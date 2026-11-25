@@ -45,8 +45,9 @@ BRAIMS/
 | Read one image per series and propose names | `bidsmapper` (BIDScoin) |
 | Apply the BRAIMS naming rules; anything not recognized is excluded and flagged | `braims/braims.py` with `braims/naming_rules.csv` |
 | Convert DICOM to BIDS (NIfTI + JSON sidecars), ages rounded and dates replaced | `bidscoiner` (BIDScoin, dcm2niix) |
-| Turn each session's 3D T1 head-up, remove the neck (FSL robustfov) and the face (pydeface) while keeping both orbits, refuse the session when the cut looks wrong, then move that mask onto every other image of the session, orbit studies included (FSL FLIRT, 6 dof) | `braims/braims_deface.py` |
-| Remove identifying sidecar fields, header text and dates; refuse DICOM, wrong codes, converter copies, one-slice images (unpacked scanner mosaics) and images that were not defaced | `braims/braims_check.py --fix` |
+| Repair what the export or the converter left wrong: stretched images, extra copies, broken headers, scanner mosaics | `braims/braims_repair.py` |
+| Turn each session's 3D T1 head-up, remove the neck (FSL robustfov) and the face (pydeface's face mask) while keeping both orbits, then move that mask onto every other image of the session, orbit studies included (FSL FLIRT, 6 dof) | `braims/braims_deface.py` |
+| Remove identifying sidecar fields, header text and dates; refuse DICOM, wrong codes, names that are not valid and images that were not defaced | `braims/braims_check.py --fix` |
 | Zip the dataset with a SHA-256 manifest, leaving out `code/` and `derivatives/`, which stay at the site | `braims/braims_check.py --package` |
 
 The orbits are kept because they are study data (optic neuritis in MS, NMOSD and MOGAD). Each eye is found in the
@@ -55,11 +56,26 @@ back to the orbital apex is added to pydeface's face mask: 24 mm around the eye 
 narrowing to 16 mm at the apex (`EYES`, `APEXES` and `ORBIT_RADIUS` in `braims/braims_deface.py`). The nose, mouth,
 cheeks, chin and neck are removed.
 
-Images are turned head-up (RAS), the way pydeface's template is stored, before the neck and face are cut: FLIRT, which
-places the face mask, starts from the image axes, and scanners save sagittal and coronal slices in other orders. A
-session is not defaced, and the tool says why, when the
-template has to be stretched by more than a third, an eye is not found, tissue stays in front of the eyes where the nose
-is, or one side loses much more than the other; a picture of the refused cut is saved next to the masks.
+Every image is defaced: each step has a fallback, so that no image stays behind because of the tool.
+
+- The image is turned head-up (RAS), the way pydeface's template is stored, before the neck and face are cut: FLIRT
+  starts from the image axes, and scanners save sagittal and coronal slices in other orders.
+- The face mask is placed in up to three ways: by pydeface's own registration; if its result fails the checks, from the
+  eyes found anywhere in the image and the centre of the head; if that fails too, from the outline of the head. A
+  result passes when both eyes are found, no tissue is left where the nose is, and the two sides lose about the same.
+  If none passes, the best one is used with a wider region kept around the orbits, and the session is marked for a look
+  at its check picture (`DefacingNote` in the sidecars, a warning in the check).
+- An image that cannot be registered to the session's 3D T1 gets the mask by the scanner coordinates alone.
+- Before defacing, `braims_repair.py` uses the converter's evenly resampled copy in place of an image stretched by
+  missing slices, gives every extra copy of a series a valid name (`rec-copy2`, ...), repairs an orientation matrix
+  that does not fit the voxel size, and unpacks a Siemens mosaic that the converter left as one flat picture because
+  the export had lost the private header. Each repair is written in the sidecar (`ImageRepair`).
+
+Tested on four 3D T1s (one volunteer, three sessions of one patient), each stored axial, sagittal, coronal and tilted
+20 degrees: the three storage orders gave identical masks; in all 32 runs both globes and the orbit contents were kept
+whole (10.5 to 11.6 mm beyond the globe) and the nose was removed. Placement from the eyes alone located them within
+1.3 mm of the registration-based result on all eight heads tested. The mosaic unpacking reproduced dcm2niix's own result
+voxel for voxel, with the same affine, on a scan available both ways.
 
 In the step-by-step route, defacing runs from the same image:
 `docker run --rm -v C:\BRAIMS:/data ghcr.io/jonadabsilva/braims:1.0.0 deface`. Masks can be corrected by hand in

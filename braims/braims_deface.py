@@ -3,19 +3,25 @@
     docker run --rm -v C:\\BRAIMS\\bids:/bids braims/deface:1.0 /bids
     docker run --rm -v C:\\BRAIMS\\bids:/bids braims/deface:1.0 /bids --reapply    (after editing a mask in ITK-SNAP)
 
-Per session: the 3D T1 (or another 3D head image) is turned head-up (RAS), whatever order the scanner stored it in,
-then gets its neck removed with FSL robustfov and its face with pydeface. Both orbits are kept (eyes, eyelids, orbital fat
-and muscles, optic nerves), because they are study data in optic neuritis (MS, NMOSD, MOGAD): each eye is found in the
-image itself (the dark vitreous), near where pydeface's registration puts it, and a cone around the eye and back to the
-orbital apex is added back to pydeface's face mask. The session is not defaced, and says why, when the registration
-stretches the template implausibly, an eye is not found, the nose would stay or the cut is lopsided.
+Every image is defaced: each step has a fallback, so no image stays behind because of this tool.
+Per session, the images are first repaired where needed (braims_repair.py: stretched images, extra copies, broken
+headers, scanner mosaics). Then the 3D T1 (or the best other image) is turned head-up (RAS), whatever order the scanner
+stored it in, its neck is removed with FSL robustfov, and the face mask of pydeface is placed on it:
+  1. by pydeface's own registration (FSL FLIRT);
+  2. if that result fails the checks, from the eyes found anywhere in the image and the centre of the head;
+  3. if that fails too, from the outline of the head.
+A result passes when both eyes are found in the image (the dark vitreous), no tissue is left where the nose is, and the
+two sides lose about the same. The first result that passes is used; if none passes, the best one is used and the session
+is marked for a look at its check picture ("DefacingNote" in the sidecars, a warning in the BRAIMS check).
+Both orbits are kept (eyes, eyelids, orbital fat and muscles, optic nerves), because they are study data in optic
+neuritis (MS, NMOSD, MOGAD): a cone around each eye and back to the orbital apex is added back to the face mask, wider
+when the eye itself was not found.
 That gives a "keep" mask, which is moved onto every other image of the session, orbit studies included, with a rigid
-FSL FLIRT registration, so thick-slice 2D images and diffusion scans lose the same face and neck. Phase images use the
+FSL FLIRT registration, or by the scanner coordinates alone when an image cannot be registered. Phase images use the
 mask of their magnitude image. Each sidecar gets "Defaced": true and "NeckRemoved": true.
 Every keep mask (1 = keep, 0 = removed) is saved in bids/derivatives/braims_deface, which never leaves the site,
 with a before/after picture of the head surface for each session.
 With --reapply, an image whose mask is already saved there gets that mask (for example one corrected in ITK-SNAP).
-An image that cannot be defaced is reported and left as it is; the BRAIMS check then keeps it from leaving the site.
 """
 import json, shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -23,7 +29,7 @@ import numpy as np
 import nibabel as nib
 from scipy import ndimage as ndi
 from scipy.signal import fftconvolve
-from braims_check import image_problems
+from braims_repair import repair, head, on_grid, volume
 try:
     import qc                                             # before/after pictures for checking by eye
 except ImportError:
@@ -33,13 +39,18 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 bids = Path(args[0] if args else "/bids")
 reapply = "--reapply" in sys.argv
 saved = bids / "derivatives" / "braims_deface"
-# Eye centres (centroid of the vitreous) and orbital apexes (mm) in the space of pydeface's template (mean_reg2mean.nii.gz)
+# In the space of pydeface's template (mean_reg2mean.nii.gz), in mm: the eye centres (centroid of the vitreous), the
+# orbital apexes, and the centre and the box of the head above the neck cut (170 mm from the top, as robustfov cuts)
 EYES = np.array(((-29.4, 78.6, -31.2), (28.8, 72.5, -32.7)))
 APEXES = EYES + np.array(((12.0, -38.0, 3.0), (-12.0, -38.0, 3.0)))      # 12 mm medial, 38 mm back, 3 mm up
+HEAD_CENTRE = np.array((-5.4, 5.0, -12.5))
+HEAD_BOX = np.array(((-91.2, -94.9, -86.7), (75.7, 121.7, 83.3)))
 ORBIT_RADIUS = (24.0, 16.0)  # mm kept around the eye centre (12 mm beyond a normal eyeball) and at the apex
+ORBIT_UNSURE = 8.0           # mm added to both when the eye itself was not found in the image
 SCALES = (0.75, 1.33)        # plausible stretch of the template onto a head, along each axis
-EYE_SEARCH = 12.0            # mm from the registration's eye centre within which the eye must be found
+EYE_SEARCH = 12.0            # mm from the expected eye centre within which the eye must be found
 EYE_CONTRAST = 0.3           # minimum (ring - vitreous) / bright tissue for an eye to count as found (eyes: 0.45-0.53)
+BRIGHT_EYES = ("_T2w", "_T2starw", "_PDT2", "_dwi")   # images where the vitreous is bright instead of dark
 NOSE_LEFT = 1.0              # cm3 of tissue allowed in front of the eyes below them, near the midline
 LOPSIDED = (0.67, 1.5)       # allowed ratio of tissue removed left / right
 
@@ -63,10 +74,10 @@ def voxels_near(shape, affine, centre, radius):
     return ijk, affine[:3, :3] @ ijk + affine[:3, 3:4]
 
 
-def orbit_cones(shape, affine, eyes, apexes):
+def orbit_cones(shape, affine, eyes, apexes, extra=0.0):
     """Both orbits: a cone from each eye centre (ORBIT_RADIUS[0], also in front of the eye) to its apex (ORBIT_RADIUS[1])."""
     keep = np.zeros(shape[:3], bool)
-    r_eye, r_apex = ORBIT_RADIUS
+    r_eye, r_apex = ORBIT_RADIUS[0] + extra, ORBIT_RADIUS[1] + extra
     for g, a in zip(eyes, apexes):
         ijk, xyz = voxels_near(shape, affine, (g + a) / 2, np.linalg.norm(a - g) / 2 + r_eye)
         v = a - g
@@ -76,36 +87,65 @@ def orbit_cones(shape, affine, eyes, apexes):
     return keep
 
 
-def find_eyes(img, expected):
-    """Each eye in the image: the centre of the darkest 8 mm ball (vitreous) ringed by brighter tissue (13-17 mm),
-    within EYE_SEARCH mm of where the registration puts it. Returns the centres (mm), their contrast and how far they moved."""
+def eye_kernels(mm):
+    """An 8 mm ball (the vitreous) and a 13-17 mm ring (the tissue around the eye), on a grid of mm per voxel."""
+    n = int(np.ceil(17 / mm))
+    dist = np.sqrt((np.mgrid[-n:n + 1, -n:n + 1, -n:n + 1] ** 2).sum(0)) * mm
+    ball, ring = (dist <= 8).astype(np.float32), ((dist >= 13) & (dist <= 17)).astype(np.float32)
+    return ball / ball.sum(), ring / ring.sum()
+
+
+def find_eyes(img, expected, sign):
+    """Each eye near where it is expected: the centre of the darkest 8 mm ball ringed by brighter tissue, within
+    EYE_SEARCH mm. Returns the centres (mm) and whether both look like eyes, about an eye distance apart."""
     data = np.asanyarray(img.dataobj).astype(np.float32)
     grid = np.mgrid[-32:33, -32:33, -32:33].astype(np.float32)
     dist = np.sqrt((grid ** 2).sum(0))
-    ball, ring = (dist <= 8).astype(np.float32), ((dist >= 13) & (dist <= 17)).astype(np.float32)
-    ball, ring = ball / ball.sum(), ring / ring.sum()
-    centres, contrast, moved = [], [], []
+    ball, ring = eye_kernels(1)
+    centres, good = [], True
     for e in expected:
         pts = nib.affines.apply_affine(np.linalg.inv(img.affine), grid.reshape(3, -1).T + e)
         cube = ndi.map_coordinates(data, pts.T, order=1, cval=0).reshape(dist.shape)
         cube /= max(np.percentile(cube, 95), 1e-6)
-        score = np.where(dist <= EYE_SEARCH, fftconvolve(cube, ring, mode="same") - fftconvolve(cube, ball, mode="same"), -np.inf)
+        score = sign * (fftconvolve(cube, ring, mode="same") - fftconvolve(cube, ball, mode="same"))
+        score = np.where(dist <= EYE_SEARCH, score, -np.inf)
         i = np.unravel_index(np.argmax(score), score.shape)
         centres.append(e + np.array(i) - 32)
-        contrast.append(float(score[i]))
-        moved.append(float(dist[i]))
-    return np.array(centres), contrast, moved
+        good &= score[i] >= EYE_CONTRAST and dist[i] <= EYE_SEARCH - 2
+    centres = np.array(centres)
+    return centres, bool(good and 45 <= np.linalg.norm(centres[0] - centres[1]) <= 80)
 
 
-def head(data):
-    """Head mask: smoothed image above a third of the Otsu threshold, largest piece, holes filled."""
-    sm = ndi.gaussian_filter(data.astype(np.float32), 1.2)
-    hist, edges = np.histogram(sm[sm > 0], 256)
-    c = (edges[:-1] + edges[1:]) / 2
-    w0 = np.cumsum(hist)
-    m0, m1 = np.cumsum(hist * c) / np.maximum(w0, 1), (np.sum(hist * c) - np.cumsum(hist * c)) / np.maximum(w0[-1] - w0, 1)
-    lab, n = ndi.label(sm > 0.35 * c[np.argmax(w0 * (w0[-1] - w0) * (m0 - m1) ** 2)])
-    return ndi.binary_fill_holes(lab == np.argmax(np.bincount(lab.ravel())[1:]) + 1) if n else lab > 0
+def search_eyes(img, tissue, sign):
+    """Both eyes found anywhere in the head, with no template: a pair of eye-like spots 50-78 mm apart, at about the same
+    height and depth, in front of the centre of the head and 60-138 mm below its top. The maxillary sinuses look like
+    eyes too (dark, ringed by tissue), so among the strong pairs the highest one is taken. None when there is no pair."""
+    data = np.asanyarray(img.dataobj).astype(np.float32)
+    zoom = np.array(img.header.get_zooms()[:3]) / 2.0                     # work at 2 mm
+    small = ndi.zoom(data, zoom, order=1)
+    small /= max(np.percentile(small, 95), 1e-6)
+    ball, ring = eye_kernels(2)
+    score = sign * (fftconvolve(small, ring, mode="same") - fftconvolve(small, ball, mode="same"))
+    score[ndi.zoom(tissue.astype(np.uint8), zoom, order=0) == 0] = -np.inf
+    peaks = np.argwhere((score == ndi.maximum_filter(score, size=9)) & (score >= EYE_CONTRAST))
+    peaks = peaks[np.argsort(-score[tuple(peaks.T)])][:15]
+    spots = nib.affines.apply_affine(img.affine, peaks / zoom)
+    xyz = nib.affines.apply_affine(img.affine, np.argwhere(tissue))
+    middle, top = xyz.mean(0), xyz[:, 2].max()
+    pairs = []
+    for i in range(len(spots)):
+        for j in range(i + 1, len(spots)):
+            d, height = np.abs(spots[i] - spots[j]), (spots[i][2] + spots[j][2]) / 2
+            if (50 <= np.linalg.norm(d) <= 78 and d[1] < 20 and d[2] < 20 and min(spots[i][1], spots[j][1]) > middle[1]
+                    and 60 <= top - height <= 138):
+                pairs.append((score[tuple(peaks[i])] + score[tuple(peaks[j])], height, i, j))
+    if not pairs:
+        return None
+    strongest = max(pairs)[0]
+    _, _, i, j = max((p for p in pairs if p[0] >= 0.8 * strongest), key=lambda p: p[1])
+    pair = spots[[i, j]]
+    eyes, good = find_eyes(img, pair[np.argsort(pair[:, 0])], sign)     # the left eye first, as in EYES
+    return eyes if good else None
 
 
 def cut_checks(img, tissue, face, orbits, eyes, apexes):
@@ -126,63 +166,121 @@ def cut_checks(img, tissue, face, orbits, eyes, apexes):
     return left_cc, removed[s < 0].sum() / max(removed[s >= 0].sum(), 1)
 
 
-def landmarks(out):
-    """pydeface's template with the eye centres (1, 2) and orbital apexes (3, 4) marked as 4 mm balls."""
-    import pydeface
-    fm = nib.load(Path(pydeface.__file__).parent / "data" / "facemask.nii.gz")
-    marks = np.zeros(fm.shape, np.uint8)
-    for k, c in enumerate(list(EYES) + list(APEXES), 1):
-        ijk, xyz = voxels_near(fm.shape, fm.affine, c, 4)
-        inside = ((xyz - c[:, None]) ** 2).sum(0) <= 16
-        marks[tuple(ijk[:, inside])] = k
-    nib.Nifti1Image(marks, fm.affine).to_filename(out)
-    return out
+def template_on(img, to_image):
+    """pydeface's face mask, and the eyes and apexes of its template, carried onto an image by a matrix (mm to mm)."""
+    m = np.linalg.inv(FACE.affine) @ np.linalg.inv(to_image) @ img.affine
+    face = ndi.affine_transform(np.asanyarray(FACE.dataobj), m[:3, :3], m[:3, 3], output_shape=img.shape[:3], order=0, cval=1) > 0.5
+    return face, nib.affines.apply_affine(to_image, EYES), nib.affines.apply_affine(to_image, APEXES)
 
 
-def face_and_neck(ref, tmp):
-    """Keep mask on the reference image's own grid, or None and the reason it was not made."""
-    canon = nib.as_closest_canonical(nib.load(ref))
-    up, crop, mat = tmp / "headup.nii.gz", tmp / "crop.nii.gz", tmp / "roi2full.mat"
-    canon.to_filename(up)                                 # FLIRT starts from the voxel axes: work head-up, like the template
-    run("robustfov", "-i", up, "-r", crop, "-m", mat)
+def by_pydeface(crop, img, tissue, sign, tmp):
+    """Placement 1: pydeface's own registration of its template (FSL FLIRT)."""
     run("pydeface", crop, "--outfile", tmp / "crop_defaced.nii.gz", "--force", "--nocleanup")
     scales = np.linalg.svd(np.loadtxt(tmp / "crop_pydeface.mat")[:3, :3], compute_uv=False)
     run("flirt", "-in", MARKS, "-ref", crop, "-applyxfm", "-init", tmp / "crop_pydeface.mat",
         "-interp", "nearestneighbour", "-out", tmp / "marks.nii.gz")
-    cropimg, marks = nib.load(crop), nib.load(tmp / "marks.nii.gz")
+    marks = nib.load(tmp / "marks.nii.gz")
     m = np.asanyarray(marks.dataobj)
-    points = np.array([nib.affines.apply_affine(marks.affine, np.argwhere(m == k).mean(0)) if (m == k).any()
-                       else np.full(3, np.nan) for k in (1, 2, 3, 4)])
-    if not np.isfinite(points).all():                     # the template's eyes fell outside the image
-        return None, "the eyes were not found where the registration puts them"
-    expected, apexes = points[:2], points[2:]
-    eyes, contrast, moved = find_eyes(cropimg, expected)
-    face = np.asanyarray(nib.load(tmp / "crop_pydeface_mask.nii.gz").dataobj) > 0.5
-    apexes = apexes + eyes - expected
-    orbits = orbit_cones(cropimg.shape, cropimg.affine, eyes, apexes)
-    keep = face | orbits
-    # checks: a wrong registration moves the cut off the face
-    problem = None
-    gap = np.linalg.norm(eyes[0] - eyes[1])
-    if not (SCALES[0] <= scales.min() and scales.max() <= SCALES[1]):
-        problem = f"the template had to be stretched {scales.min():.2f} to {scales.max():.2f} times: the image may be distorted"
-    elif min(contrast) < EYE_CONTRAST or max(moved) > EYE_SEARCH - 2 or not 45 <= gap <= 80:
-        problem = "the eyes were not found where the registration puts them"
-    else:
-        left_cc, ratio = cut_checks(cropimg, head(np.asanyarray(cropimg.dataobj)), face, orbits, eyes, apexes)
-        if left_cc > NOSE_LEFT:
-            problem = f"the nose would stay ({left_cc:.0f} cm3 left in front of the eyes)"
-        elif not LOPSIDED[0] <= ratio <= LOPSIDED[1]:
-            problem = f"the cut is lopsided ({ratio:.1f} times more removed on one side)"
-    nib.Nifti1Image(keep.astype(np.uint8), cropimg.affine).to_filename(tmp / "crop_keep.nii.gz")
-    run("flirt", "-in", tmp / "crop_keep.nii.gz", "-ref", up, "-applyxfm", "-init", mat,
-        "-interp", "nearestneighbour", "-out", tmp / "headup_keep.nii.gz")
-    k = nib.load(tmp / "headup_keep.nii.gz")
+    if not (SCALES[0] <= scales.min() and scales.max() <= SCALES[1]) or not all((m == k).any() for k in (1, 2, 3, 4)):
+        return None                                       # the template was stretched implausibly or fell outside the image
+    points = np.array([nib.affines.apply_affine(marks.affine, np.argwhere(m == k).mean(0)) for k in (1, 2, 3, 4)])
+    return np.asanyarray(nib.load(tmp / "crop_pydeface_mask.nii.gz").dataobj) > 0.5, points[:2], points[2:]
+
+
+def by_eyes(crop, img, tissue, sign, tmp):
+    """Placement 2: the template turned, sized and moved so that its eyes and head centre fall on the image's."""
+    eyes = search_eyes(img, tissue, sign)
+    if eyes is None:
+        return None
+    src = np.vstack([EYES, HEAD_CENTRE])
+    dst = np.vstack([eyes, nib.affines.apply_affine(img.affine, np.argwhere(tissue).mean(0))])
+    u, sv, vt = np.linalg.svd((dst - dst.mean(0)).T @ (src - src.mean(0)))
+    d = np.diag([1, 1, np.sign(np.linalg.det(u @ vt))])
+    m = np.eye(4)
+    m[:3, :3] = (sv * d.diagonal()).sum() / ((src - src.mean(0)) ** 2).sum() * u @ d @ vt
+    m[:3, 3] = dst.mean(0) - m[:3, :3] @ src.mean(0)
+    return template_on(img, m)
+
+
+def by_outline(crop, img, tissue, sign, tmp):
+    """Placement 3, always possible: the box of the template's head stretched onto the box of this head."""
+    xyz = nib.affines.apply_affine(img.affine, np.argwhere(tissue))
+    m = np.eye(4)
+    m[:3, :3] = np.diag((xyz.max(0) - xyz.min(0)) / (HEAD_BOX[1] - HEAD_BOX[0]))
+    m[:3, 3] = xyz.min(0) - m[:3, :3] @ HEAD_BOX[0]
+    return template_on(img, m)
+
+
+PLACEMENTS = ((by_pydeface, "pydeface"), (by_eyes, "the eyes found in the image"), (by_outline, "the outline of the head"))
+
+
+def face_and_neck(ref, tmp):
+    """Keep mask on the reference image's own grid, how the face mask was placed, and whether a person should look."""
     native = nib.load(ref)
-    back = nib.orientations.ornt_transform(nib.io_orientation(k.affine), nib.io_orientation(native.affine))
-    k = nib.orientations.apply_orientation(np.asanyarray(k.dataobj) > 0.5, back)
-    nib.Nifti1Image(k.astype(np.uint8), native.affine).to_filename(tmp / "keep_ref.nii.gz")
-    return tmp / "keep_ref.nii.gz", problem
+    sign = -1 if ref.name[:-7].endswith(BRIGHT_EYES) else 1
+    up, crop = tmp / "headup.nii.gz", tmp / "crop.nii.gz"
+    nib.as_closest_canonical(native).to_filename(up)      # FLIRT starts from the voxel axes: work head-up, like the template
+    try:
+        run("robustfov", "-i", up, "-r", crop)
+    except subprocess.CalledProcessError:
+        shutil.copyfile(up, crop)                         # no neck cut: the face mask also removes the front of the neck
+    img = nib.load(crop)
+    tissue = head(np.asanyarray(img.dataobj))
+    tried = []
+    for place, name in PLACEMENTS:
+        try:
+            placed = place(crop, img, tissue, sign, tmp)
+        except subprocess.CalledProcessError:
+            placed = None
+        if placed is None:
+            continue
+        face, expected, apexes = placed
+        eyes, found = find_eyes(img, expected, sign)
+        if not found:
+            eyes = expected
+        apexes = apexes + eyes - expected
+        orbits = orbit_cones(img.shape, img.affine, eyes, apexes, 0 if found else ORBIT_UNSURE)
+        nose, ratio = cut_checks(img, tissue, face, orbits, eyes, apexes)
+        passed = found and nose <= NOSE_LEFT and LOPSIDED[0] <= ratio <= LOPSIDED[1]
+        tried.append((passed, found, -nose, name, face | orbits))
+        if passed:
+            break
+    passed, _, _, name, keep = max(tried, key=lambda t: t[:3])
+    whole = nib.load(up)
+    keep = on_grid(keep, img.affine, whole.shape, whole.affine)             # outside the neck cut: removed
+    back = nib.orientations.ornt_transform(nib.io_orientation(whole.affine), nib.io_orientation(native.affine))
+    keep = nib.orientations.apply_orientation(keep, back)
+    nib.Nifti1Image(keep.astype(np.uint8), native.affine).to_filename(tmp / "keep_ref.nii.gz")
+    return tmp / "keep_ref.nii.gz", name, not passed
+
+
+def landmarks(out):
+    """pydeface's template with the eye centres (1, 2) and orbital apexes (3, 4) marked as 4 mm balls."""
+    marks = np.zeros(FACE.shape, np.uint8)
+    for k, c in enumerate(list(EYES) + list(APEXES), 1):
+        ijk, xyz = voxels_near(FACE.shape, FACE.affine, c, 4)
+        inside = ((xyz - c[:, None]) ** 2).sum(0) <= 16
+        marks[tuple(ijk[:, inside])] = k
+    nib.Nifti1Image(marks, FACE.affine).to_filename(out)
+    return out
+
+
+def by_coordinates(keep, img, out):
+    """A keep mask moved onto another image by the scanner coordinates alone; what lies outside the mask's image is removed."""
+    k, target = nib.load(keep), nib.load(img)
+    moved = on_grid(np.asanyarray(k.dataobj), k.affine, target.shape, target.affine)
+    nib.Nifti1Image(moved.astype(np.uint8), target.affine).to_filename(out)
+    return out
+
+
+def reference(images):
+    """The image the mask is made on: a 3D T1 without contrast if there is one, else another 3D head image, else the
+    image with the most slices."""
+    def rank(p):
+        three_d = "/anat/" in p.as_posix() and sidecar(p)[1].get("MRAcquisitionType") == "3D"
+        return (three_d and p.name.endswith("_T1w.nii.gz") and "ce-" not in p.name, three_d, "/anat/" in p.as_posix(),
+                nib.load(p).shape[2])
+    return max([p for p in images if "part-phase" not in p.name and "acq-orbit" not in p.name] or images, key=rank)
 
 
 def first_volume(img, out):
@@ -210,108 +308,96 @@ def apply_keep(img, keep):
     return 100 * (1 - k.mean())
 
 
-done, failed = 0, []
+import pydeface
+FACE = nib.load(Path(pydeface.__file__).parent / "data" / "facemask.nii.gz")
 MARKS = landmarks(Path(tempfile.mkdtemp()) / "orbit_landmarks.nii.gz")
+done, failed, look = 0, [], []
 sessions = sorted({p.parent.parent for d in ("anat", "dwi") for p in bids.glob(f"sub-*/**/{d}/*.nii.gz")})
 for session in sessions:
     images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
-    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True]
-    if not todo:
+    if all(sidecar(p)[1].get("Defaced") is True for p in images):
         continue
     print(session.relative_to(bids))
-    problems = {img: [kind for kind, _ in image_problems(img)] for img in images}
-    held = [img for img in images if {"copy", "stretched"} & set(problems[img])]
-    if held:
-        # a stretched image or a second copy can give a wrong mask: sort them out first, then deface the whole session
-        print("  NOT DEFACED  the whole session: first sort out these images (Step 6 and Part E of the manual)")
-        for img in held:
-            print(f"    {img.relative_to(session)}  ({', '.join(k for k in problems[img] if k != 'one slice')})")
-        failed += todo
-        continue
+    repair(session)
+    images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
+    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True]
     for img in list(todo):
-        if "one slice" in problems[img]:
-            print(f"  NOT DEFACED  {img.relative_to(session)}  (one slice: see Part E of the manual)")
-            failed.append(img)
-            todo.remove(img)
-        elif reapply and saved_mask(img).exists():
+        if reapply and saved_mask(img).exists():
             removed = apply_keep(img, saved_mask(img))
             side, meta = sidecar(img)
             meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": "saved keep mask (checked or edited by hand)"})
+            meta.pop("DefacingNote", None)
             side.write_text(json.dumps(meta, indent=4))
             todo.remove(img)
             done += 1
             print(f"  done  {img.relative_to(session)}  (saved mask applied, {removed:.0f}% removed)")
     if not todo:
         continue
-    three_d = [p for p in images if "/anat/" in p.as_posix() and "part-phase" not in p.name and "acq-orbit" not in p.name
-               and sidecar(p)[1].get("MRAcquisitionType") == "3D" and len(nib.load(p).shape) == 3]
-    t1 = [p for p in three_d if p.name.endswith("_T1w.nii.gz") and "ce-" not in p.name]
-    ref = (t1 or three_d or [None])[0]
-    if ref is None:
-        print("  no 3D head image in this session: nothing was defaced here. Tell the core center.")
-        failed += todo
-        continue
+    ref = reference(images)
     picture = saved / session.relative_to(bids) / f"{'_'.join(session.relative_to(bids).parts)}_deface_check.png"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        # 1. Neck (robustfov) and face (pydeface, orbits kept) on the reference image -> a keep mask on its own grid
-        original = tmp / "reference.nii.gz"
-        shutil.copyfile(ref, original)                    # register from the untouched copy
+        # 1. Neck (robustfov) and face (pydeface's mask, orbits kept) on the reference image -> a keep mask on its own grid
+        original = first_volume(ref, tmp / ref.name)      # register from the untouched copy
         try:
-            keep_ref, problem = face_and_neck(original, tmp)
-        except subprocess.CalledProcessError as e:
-            keep_ref, problem = None, f"neck and face removal failed on {ref.name} ({e.stderr.decode(errors='replace').strip()[-200:]})"
-        if problem:
-            print(f"  NOT DEFACED  the whole session: {problem}. See Part E of the manual.")
-            if keep_ref and qc:                           # show the cut that was refused
-                trial = tmp / "trial.nii.gz"
-                shutil.copyfile(original, trial)
-                im = nib.load(trial)
-                nib.Nifti1Image(np.asanyarray(im.dataobj) * (np.asanyarray(nib.load(keep_ref).dataobj) > 0), im.affine).to_filename(trial)
-                picture = picture.with_name(picture.stem + "_REFUSED.png")
-                picture.parent.mkdir(parents=True, exist_ok=True)
-                qc.before_after(original, trial, picture)
-                print(f"  picture of the refused cut: {picture.relative_to(bids)}")
+            if sidecar(ref)[1].get("Defaced") is True:    # defaced in an earlier run: its saved mask is the session's
+                keep_ref, placed, unsure = saved_mask(ref), None, bool(sidecar(ref)[1].get("DefacingNote"))
+            else:
+                keep_ref, placed, unsure = face_and_neck(original, tmp)
+        except Exception as e:                            # an image that cannot be read at all
+            print(f"  NOT DEFACED  the whole session: {ref.name} could not be read ({e})")
             failed += todo
             continue
+        if placed:
+            print(f"  face mask placed by {placed}, on {ref.name}")
+        if unsure:
+            look.append(session)
+            print("  LOOK  no placement of the face mask passed the checks: the best one was used. Look at the check picture.")
         # 2. The same mask on every other image of the session
         masks = {}
         for img in todo:
             mag = Path(str(img).replace("part-phase", "part-mag"))
-            how = "robustfov + pydeface, orbits kept" + ("" if img == ref else f", on {ref.name}, moved here with FSL FLIRT (6 dof)")
+            how = f"robustfov + pydeface's face mask placed by {placed}, orbits kept"
             try:
+                target = first_volume(img, tmp / f"{img.name[:-7]}_vol0.nii.gz")
+                keep = tmp / f"{img.name[:-7]}_keep.nii.gz"
                 if img == ref:
                     keep = keep_ref
                 elif "part-phase" in img.name and (mag in masks or saved_mask(mag).exists()):
                     keep = masks.get(mag, saved_mask(mag))      # the magnitude image of the same scan
-                elif "part-phase" in img.name:
-                    # phase without its magnitude: too little anatomy to register, so use the scanner coordinates alone
-                    keep = tmp / f"{img.name[:-7]}_keep.nii.gz"
-                    run("flirt", "-in", keep_ref, "-ref", first_volume(img, tmp / f"{img.name[:-7]}_vol0.nii.gz"),
-                        "-applyxfm", "-usesqform", "-interp", "nearestneighbour", "-out", keep)
-                    how = f"robustfov + pydeface, orbits kept, on {ref.name}, moved here by the scanner coordinates (FSL FLIRT)"
+                    how = f"the keep mask of {mag.name}"
                 else:
-                    target = first_volume(img, tmp / f"{img.name[:-7]}_vol0.nii.gz")
-                    omat, keep = tmp / f"{img.name[:-7]}.mat", tmp / f"{img.name[:-7]}_keep.nii.gz"
-                    # same session, same scanner coordinates: start from the header geometry, no wide rotation search
-                    run("flirt", "-in", original, "-ref", target, "-dof", "6", "-cost", "mutualinfo", "-usesqform", "-nosearch",
-                        "-omat", omat)
-                    run("flirt", "-in", keep_ref, "-ref", target, "-applyxfm", "-init", omat,
-                        "-interp", "nearestneighbour", "-out", keep)
-            except subprocess.CalledProcessError as e:
-                print(f"  NOT DEFACED  {img.relative_to(session)}  ({e.stderr.decode(errors='replace').strip()[-200:]})")
+                    how = f"the keep mask of {ref.name}, moved here with FSL FLIRT (6 dof)"
+                    try:
+                        if "part-phase" in img.name or min(nib.load(target).shape) < 5:
+                            raise ValueError("too little anatomy to register")
+                        # same session, same scanner coordinates: start from the header geometry, no wide rotation search
+                        run("flirt", "-in", original, "-ref", target, "-dof", "6", "-cost", "mutualinfo", "-usesqform",
+                            "-nosearch", "-omat", tmp / "move.mat")
+                        run("flirt", "-in", keep_ref, "-ref", target, "-applyxfm", "-init", tmp / "move.mat",
+                            "-interp", "nearestneighbour", "-out", keep)
+                    except (ValueError, subprocess.CalledProcessError):
+                        by_coordinates(keep_ref, target, keep)
+                        how = f"the keep mask of {ref.name}, moved here by the scanner coordinates"
+                masks[img] = keep
+                removed = apply_keep(img, keep)
+            except Exception as e:                        # an image that cannot be read at all
+                print(f"  NOT DEFACED  {img.relative_to(session)}  ({e})")
                 failed.append(img)
                 continue
-            masks[img] = keep
-            removed = apply_keep(img, keep)
             if img == ref and qc:
                 qc.before_after(original, img, picture)
                 print(f"  check picture: {picture.relative_to(bids)}")
             side, meta = sidecar(img)
             meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": how})
+            if unsure:
+                meta["DefacingNote"] = "no placement of the face mask passed the checks: look at the check picture"
             side.write_text(json.dumps(meta, indent=4))
             done += 1
-            print(f"  done  {img.relative_to(session)}  ({removed:.0f}% of the volume removed)")
+            print(f"  done  {img.relative_to(session)}  ({removed:.0f}% of the volume removed"
+                  + (", mask moved by the scanner coordinates)" if how.endswith("scanner coordinates") else ")"))
 print(f"\n{done} image(s) defaced. Look at one image per session before you go on.")
+if look:
+    print(f"{len(look)} session(s) need a look at their check picture first: " + ", ".join(str(s.relative_to(bids)) for s in look))
 if failed:
-    print(f"{len(failed)} image(s) could not be defaced. They stay at the site: the BRAIMS check will not package them.")
+    print(f"{len(failed)} image(s) could not be read. They stay at the site: the BRAIMS check will not package them.")

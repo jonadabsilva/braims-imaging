@@ -77,14 +77,13 @@ def image_problems(f):
     return found
 
 
-PROBLEM = {
-    "copy": "extra copy made by the converter: the exam folder held two versions of this series, or slices are missing. "
-            "An Eq copy has the right geometry: keep it under the series' own name and delete the original. Otherwise keep "
-            "the complete image (compare the sizes). Delete the others with their .json/.bval/.bvec, or export the exam again",
-    "stretched": "slice spacing does not match the scanner: slices are probably missing, so the image is stretched and "
-                 "defacing can fail. Use the converter's Eq copy of this series, or export the exam again",
-    "one slice": "one slice only: a scanner mosaic that the converter could not unpack, because the export lost the scanner's "
-                 "private header. Export the series again with all DICOM tags kept, or delete it with its .json/.bval/.bvec",
+PROBLEM = {       # the defacing step repairs these itself (braims_repair.py): what is still reported was not repaired
+    "copy": ("ERROR", "extra copy made by the converter, under a name that is not valid: run the defacing step, which "
+                      "gives every copy a valid name"),
+    "stretched": ("WARNING", "slice spacing does not match the scanner: slices are probably missing from the export, so "
+                             "the image is stretched. Export the exam again if you can; tell the core center if you cannot"),
+    "one slice": ("WARNING", "one slice only: if this is a scanner mosaic that could not be unpacked, export the series "
+                             "again with all DICOM tags kept; tell the core center if you cannot"),
 }
 
 
@@ -105,12 +104,14 @@ def check_names(bids):
     for f in files(bids, "*.nii*"):
         rel, problems = f.relative_to(bids), image_problems(f)
         for kind, detail in problems:
-            report("ERROR", f"{rel}  ({detail})", PROBLEM[kind])
+            report(PROBLEM[kind][0], f"{rel}  ({detail})", PROBLEM[kind][1])
         side = f.parent / (f.name.split(".")[0] + ".json")
         meta = json.loads(side.read_text(encoding="utf-8")) if side.exists() else {}
-        if "one slice" not in (kind for kind, _ in problems) and meta.get("Defaced") is not True:
-            report("ERROR", rel, "not defaced: run the defacing step. An image it cannot deface stays at the site: "
-                                 "delete it with its .json/.bval/.bvec")
+        if meta.get("Defaced") is not True:
+            report("ERROR", rel, "not defaced: run the defacing step")
+        elif meta.get("DefacingNote"):
+            report("WARNING", rel, "defaced, but no placement of the face mask passed the checks: look at the session's "
+                                   "check picture; correct the mask by hand if the face shows (Part D of the manual)")
 
 
 def check_json(bids, fix):
