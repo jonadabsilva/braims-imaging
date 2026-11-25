@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below, together with BIDScoin, dcm2niix, pydeface and FSL."
+message: "If you use this software, please cite the BRAIMS paper (preferred citation below), together with BIDScoin, dcm2niix, pydeface and FSL. A paper on this pipeline is in preparation; this citation will change when it is published."
 title: "BRAIMS imaging pipeline: site-level de-identification, BIDS conversion and orbit-sparing defacing of brain MRI"
 version: 1.0.0
 date-released: 2026-11-25
@@ -9,6 +9,56 @@ authors:
   - family-names: "dos Santos Silva"
     given-names: "Jonadab"
   - name: "BRAIMS Imaging Working Group"
+preferred-citation:
+  type: article
+  title: "Collaborative Latin American Imaging Network In Neuroimmunology Research (BRAIMS): Rationale, Structure, Challenges, and Future Directions"
+  authors:
+    - family-names: "Carnero Contentti"
+      given-names: "Edgar"
+    - family-names: "Alonso"
+      given-names: "Ricardo"
+    - family-names: "Boldrini"
+      given-names: "Vinícius"
+    - family-names: "Cárcamo"
+      given-names: "Claudia"
+    - family-names: "Casas"
+      given-names: "Magdalena"
+    - family-names: "Ciampi"
+      given-names: "Ethel"
+    - family-names: "Damanesco"
+      given-names: "Alfredo"
+    - family-names: "Dos Santos Silva"
+      given-names: "Jonadab"
+    - family-names: "Rimkus"
+      given-names: "Carolina de Medeiros"
+    - family-names: "Marrodan"
+      given-names: "Mariano"
+    - family-names: "Navas"
+      given-names: "Carlos"
+    - family-names: "Patrucco"
+      given-names: "Liliana"
+    - family-names: "Pitombeira"
+      given-names: "Milena"
+    - family-names: "Ramari"
+      given-names: "Cintia"
+    - family-names: "Sato"
+      given-names: "Henry Koiti"
+    - family-names: "Soler"
+      given-names: "Bernardita"
+    - family-names: "Treviño Frenk"
+      given-names: "Irene"
+    - family-names: "Wagner"
+      given-names: "Mario"
+    - family-names: "Ontaneda"
+      given-names: "Daniel"
+    - family-names: "Becker"
+      given-names: "Jefferson"
+  journal: "Multiple Sclerosis and Related Disorders"
+  year: 2026
+  month: 6
+  volume: 110
+  start: 107203
+  doi: "10.1016/j.msard.2026.107203"
 references:
   - type: article
     title: "BIDScoin: a user-friendly application to convert source data to the Brain Imaging Data Structure"

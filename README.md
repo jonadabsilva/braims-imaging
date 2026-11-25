@@ -74,7 +74,14 @@ The BRAIMS code is under the MIT licence (`LICENSE`). The image also contains BI
 
 ## How to cite
 
-See `CITATION.cff`, and cite the tools the pipeline runs:
+Please cite the BRAIMS paper (also in `CITATION.cff`):
+
+- Carnero Contentti E, Alonso R, Boldrini V, et al. Collaborative Latin American Imaging Network In Neuroimmunology
+  Research (BRAIMS): rationale, structure, challenges, and future directions. Mult Scler Relat Disord. 2026;110:107203.
+  doi:10.1016/j.msard.2026.107203
+
+A paper describing this pipeline is in preparation; this section will be updated when it is published.
+Please also cite the tools the pipeline runs:
 
 - Zwiers MP, Moia S, Oostenveld R. BIDScoin: a user-friendly application to convert source data to the Brain Imaging
   Data Structure. Front Neuroinform. 2021;15:770608. doi:10.3389/fninf.2021.770608
