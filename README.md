@@ -53,8 +53,7 @@ The orbits are kept because they are study data (optic neuritis in MS, NMOSD and
 balls of 24 mm radius around the eye centres, 12 mm beyond a normal eyeball on every side, defined in the space of
 pydeface's template (`ORBITS` and `ORBIT_RADIUS` in `braims/braims_deface.py`) and added to pydeface's face mask;
 pydeface's own registration then moves them onto each person. The margin protects the orbit if that registration is
-off by several millimetres. The eyelids and the skin around the eyes therefore stay in the images, a small part of the
-face.
+off by several millimetres. Only the eye region is kept; the nose, mouth, cheeks, chin and neck are removed.
 
 In the step-by-step route, defacing runs from the same image:
 `docker run --rm -v C:\BRAIMS:/data ghcr.io/jonadabsilva/braims:1.0.0 deface`. Masks can be corrected by hand in
