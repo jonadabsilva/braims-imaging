@@ -45,15 +45,21 @@ BRAIMS/
 | Read one image per series and propose names | `bidsmapper` (BIDScoin) |
 | Apply the BRAIMS naming rules; anything not recognized is excluded and flagged | `braims/braims.py` with `braims/naming_rules.csv` |
 | Convert DICOM to BIDS (NIfTI + JSON sidecars), ages rounded and dates replaced | `bidscoiner` (BIDScoin, dcm2niix) |
-| Remove the neck (FSL robustfov) and the face (pydeface, with its face mask modified to keep both orbits) on each session's 3D T1, then move that mask onto every other image of the session, orbit studies included (FSL FLIRT, 6 dof) | `braims/braims_deface.py` |
+| Turn each session's 3D T1 head-up, remove the neck (FSL robustfov) and the face (pydeface) while keeping both orbits, refuse the session when the cut looks wrong, then move that mask onto every other image of the session, orbit studies included (FSL FLIRT, 6 dof) | `braims/braims_deface.py` |
 | Remove identifying sidecar fields, header text and dates; refuse DICOM, wrong codes, converter copies, one-slice images (unpacked scanner mosaics) and images that were not defaced | `braims/braims_check.py --fix` |
 | Zip the dataset with a SHA-256 manifest, leaving out `code/` and `derivatives/`, which stay at the site | `braims/braims_check.py --package` |
 
-The orbits are kept because they are study data (optic neuritis in MS, NMOSD and MOGAD). The orbit regions are two
-balls of 24 mm radius around the eye centres, 12 mm beyond a normal eyeball on every side, defined in the space of
-pydeface's template (`ORBITS` and `ORBIT_RADIUS` in `braims/braims_deface.py`) and added to pydeface's face mask;
-pydeface's own registration then moves them onto each person. The margin protects the orbit if that registration is
-off by several millimetres. Only the eye region is kept; the nose, mouth, cheeks, chin and neck are removed.
+The orbits are kept because they are study data (optic neuritis in MS, NMOSD and MOGAD). Each eye is found in the
+person's own 3D T1 (the dark vitreous, within 12 mm of where pydeface's registration puts it), and a cone from the eye
+back to the orbital apex is added to pydeface's face mask: 24 mm around the eye centre (12 mm beyond a normal eyeball),
+narrowing to 16 mm at the apex (`EYES`, `APEXES` and `ORBIT_RADIUS` in `braims/braims_deface.py`). The nose, mouth,
+cheeks, chin and neck are removed.
+
+Images are turned head-up (RAS), the way pydeface's template is stored, before the neck and face are cut: FLIRT, which
+places the face mask, starts from the image axes, and scanners save sagittal and coronal slices in other orders. A
+session is not defaced, and the tool says why, when the
+template has to be stretched by more than a third, an eye is not found, tissue stays in front of the eyes where the nose
+is, or one side loses much more than the other; a picture of the refused cut is saved next to the masks.
 
 In the step-by-step route, defacing runs from the same image:
 `docker run --rm -v C:\BRAIMS:/data ghcr.io/jonadabsilva/braims:1.0.0 deface`. Masks can be corrected by hand in
