@@ -1,0 +1,58 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below, together with BIDScoin, dcm2niix, pydeface and FSL."
+title: "BRAIMS imaging pipeline: site-level de-identification, BIDS conversion and orbit-sparing defacing of brain MRI"
+version: 1.0.0
+date-released: 2026-11-25
+license: MIT
+repository-code: "https://github.com/jonadabsilva/braims-imaging"
+authors:
+  - family-names: "dos Santos Silva"
+    given-names: "Jonadab"
+  - name: "BRAIMS Imaging Working Group"
+references:
+  - type: article
+    title: "BIDScoin: a user-friendly application to convert source data to the Brain Imaging Data Structure"
+    authors:
+      - family-names: Zwiers
+        given-names: Marcel P.
+      - family-names: Moia
+        given-names: Stefano
+      - family-names: Oostenveld
+        given-names: Robert
+    journal: "Frontiers in Neuroinformatics"
+    year: 2021
+    volume: 15
+    doi: "10.3389/fninf.2021.770608"
+  - type: article
+    title: "The first step for neuroimaging data analysis: DICOM to NIfTI conversion"
+    authors:
+      - family-names: Li
+        given-names: Xiangrui
+      - family-names: Morgan
+        given-names: Paul S.
+      - family-names: Ashburner
+        given-names: John
+      - family-names: Smith
+        given-names: Jolinda
+      - family-names: Rorden
+        given-names: Christopher
+    journal: "Journal of Neuroscience Methods"
+    year: 2016
+    volume: 264
+    doi: "10.1016/j.jneumeth.2016.03.001"
+  - type: software
+    title: "poldracklab/pydeface: v2.0.0"
+    authors:
+      - family-names: Gulban
+        given-names: Omer Faruk
+    year: 2019
+    doi: "10.5281/zenodo.3524401"
+  - type: article
+    title: "FSL"
+    authors:
+      - family-names: Jenkinson
+        given-names: Mark
+    journal: "NeuroImage"
+    year: 2012
+    volume: 62
+    doi: "10.1016/j.neuroimage.2011.09.015"

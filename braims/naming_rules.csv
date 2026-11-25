@@ -1,0 +1,18 @@
+pattern,mr,datatype,suffix,acq,ce,part,why
+"(_fa$|colfa|_adc|adc$|tracew|\btrace|\bfa\b|\bmip\b|mip_|minip|swi_images|^web\b|\blocali|\bloc\b|scout|survey|aahead|relat|report|entelai|icobrain|quantib|screen|capture|dose|\bteste?\b)",,exclude,,,,,"derived maps, processed images, reports and screen captures, localizers, previews, test sequences"
+"dti|dwi|diff|ep2d_diff|resolve",,dwi,dwi,=desc,,,diffusion
+"psir",,anat,T1w,PSIR,,,phase-sensitive inversion recovery
+"(^|[^a-z])dir([^a-z]|$)|double.?inv",,anat,FLAIR,DIR,,,double inversion recovery
+"^mag|mag_images|swi.*mag|mag.*swi",,anat,T2starw,SWI,,mag,SWI magnitude
+"^pha|pha_images|swi.*pha|pha.*swi",,anat,T2starw,SWI,,phase,SWI phase
+"orbit.*stir|stir.*orbit",,anat,T2w,orbitSTIR,,,orbit study (defaced with the orbits kept)
+"orbit.*t1|t1.*orbit",,anat,T1w,orbitT1,auto,,orbit study (defaced with the orbits kept)
+"orbit",,anat,T2w,orbit,,,orbit study (defaced with the orbits kept)
+"flair",3D,anat,FLAIR,3D,,,3D FLAIR
+"flair",,anat,FLAIR,2D,,,2D FLAIR
+"pd.?\+?.?t2|pdt2|dual.?echo",,anat,PDT2,2D,,,proton density and T2 (dual echo)
+"mprage",3D,anat,T1w,MPRAGE,auto,,3D T1 MPRAGE
+"t1|bravo|tfe",3D,anat,T1w,3D,auto,,other 3D T1
+"t1",,anat,T1w,SE,auto,,2D T1
+"t2",3D,anat,T2w,3D,,,3D T2
+"t2",,anat,T2w,2D,,,2D T2
