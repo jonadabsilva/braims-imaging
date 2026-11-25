@@ -18,6 +18,7 @@ import json, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import numpy as np
 import nibabel as nib
+from braims_check import image_problems
 try:
     import qc                                             # before/after pictures for checking by eye
 except ImportError:
@@ -96,9 +97,17 @@ for session in sessions:
     if not todo:
         continue
     print(session.relative_to(bids))
+    problems = {img: [kind for kind, _ in image_problems(img)] for img in images}
+    held = [img for img in images if {"copy", "stretched"} & set(problems[img])]
+    if held:
+        # a stretched image or a second copy can give a wrong mask: sort them out first, then deface the whole session
+        print("  NOT DEFACED  the whole session: first sort out these images (Step 6 and Part E of the manual)")
+        for img in held:
+            print(f"    {img.relative_to(session)}  ({', '.join(k for k in problems[img] if k != 'one slice')})")
+        failed += todo
+        continue
     for img in list(todo):
-        shape = nib.load(img).shape
-        if len(shape) < 3 or shape[2] < 2:
+        if "one slice" in problems[img]:
             print(f"  NOT DEFACED  {img.relative_to(session)}  (one slice: see Part E of the manual)")
             failed.append(img)
             todo.remove(img)

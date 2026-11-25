@@ -34,10 +34,12 @@ CONVERTER_COPY = re.compile(r"(Eq\d+|Tilt\d*|reala|imaginarya|pha)$")    # dcm2n
 found = {}      # (level, message) -> files
 
 
-def image_dims(f):
+def image_header(f):
+    """Image size and voxel size (mm) from the NIfTI header."""
     with (gzip.open(f) if f.name.endswith(".gz") else open(f, "rb")) as h:
-        dims = struct.unpack("<8h", h.read(348)[40:56])
-    return dims[1:dims[0] + 1]
+        header = h.read(348)
+    dims, pixdims = struct.unpack("<8h", header[40:56]), struct.unpack("<8f", header[76:108])
+    return dims[1:dims[0] + 1], pixdims[1:dims[0] + 1]
 
 
 def report(level, path, msg):
@@ -55,6 +57,37 @@ def show(level):
     return sum(len(p) for (lv, _), p in found.items() if lv == level)
 
 
+def image_problems(f):
+    """Why an image cannot be used as it is: [(kind, detail)], kind = "copy", "stretched" or "one slice"."""
+    dims, spacing = image_header(f)
+    side = f.parent / (f.name.split(".")[0] + ".json")
+    meta = json.loads(side.read_text(encoding="utf-8")) if side.exists() else {}
+    parts, size = f.name.split(".")[0].split("_"), "x".join(map(str, dims))
+    found = []
+    if parts[-1] not in SUFFIXES or any(CONVERTER_COPY.search(p.split("-", 1)[-1]) for p in parts[1:-1]):
+        found.append(("copy", size))
+    between = meta.get("SpacingBetweenSlices") or meta.get("SliceThickness")
+    if len(dims) >= 3 and dims[2] > 1 and between:
+        middle = sorted(spacing[:3])[1]
+        slices = max(spacing[:3], key=lambda s: abs(s - middle))  # the axis unlike the other two: defaced images are reoriented
+        if slices > 1.25 * between:
+            found.append(("stretched", f"{slices:.2f} mm between slices; the scanner says {between:g} mm"))
+    if len(dims) < 3 or dims[2] < 2:
+        found.append(("one slice", size))
+    return found
+
+
+PROBLEM = {
+    "copy": "extra copy made by the converter: the exam folder held two versions of this series, or slices are missing. "
+            "An Eq copy has the right geometry: keep it under the series' own name and delete the original. Otherwise keep "
+            "the complete image (compare the sizes). Delete the others with their .json/.bval/.bvec, or export the exam again",
+    "stretched": "slice spacing does not match the scanner: slices are probably missing, so the image is stretched and "
+                 "defacing can fail. Use the converter's Eq copy of this series, or export the exam again",
+    "one slice": "one slice only: a scanner mosaic that the converter could not unpack, because the export lost the scanner's "
+                 "private header. Export the series again with all DICOM tags kept, or delete it with its .json/.bval/.bvec",
+}
+
+
 def files(bids, pattern):
     return [f for f in sorted(bids.rglob(pattern)) if f.relative_to(bids).parts[0] not in LEAVE_OUT]
 
@@ -70,19 +103,12 @@ def check_names(bids):
         if f.suffix.lower() in (".dcm", ".ima") or f.name.upper() == "DICOMDIR":
             report("ERROR", f.relative_to(bids), "DICOM file; DICOM never leaves the site")
     for f in files(bids, "*.nii*"):
-        rel, dims = f.relative_to(bids), image_dims(f)
-        parts = f.name.split(".")[0].split("_")
+        rel, problems = f.relative_to(bids), image_problems(f)
+        for kind, detail in problems:
+            report("ERROR", f"{rel}  ({detail})", PROBLEM[kind])
         side = f.parent / (f.name.split(".")[0] + ".json")
         meta = json.loads(side.read_text(encoding="utf-8")) if side.exists() else {}
-        if parts[-1] not in SUFFIXES or any(CONVERTER_COPY.search(p.split("-", 1)[-1]) for p in parts[1:-1]):
-            report("ERROR", f"{rel}  ({'x'.join(map(str, dims))})",
-                   "extra copy made by the converter: the exam folder held two versions of this series, or slices were missing. "
-                   "Keep the complete image (compare the sizes), delete the others with their .json/.bval/.bvec, or export the exam again")
-        if len(dims) < 3 or dims[2] < 2:
-            report("ERROR", f"{rel}  ({'x'.join(map(str, dims))})",
-                   "one slice only: a scanner mosaic that the converter could not unpack, because the export lost the scanner's "
-                   "private header. Export the series again with all DICOM tags kept, or delete it with its .json/.bval/.bvec")
-        elif meta.get("Defaced") is not True:
+        if "one slice" not in (kind for kind, _ in problems) and meta.get("Defaced") is not True:
             report("ERROR", rel, "not defaced: run the defacing step. An image it cannot deface stays at the site: "
                                  "delete it with its .json/.bval/.bvec")
 
