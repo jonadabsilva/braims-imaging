@@ -15,13 +15,12 @@ The site's BRAIMS folder holds:
 import base64, csv, datetime, html, re, subprocess, sys
 from pathlib import Path
 import yaml
+import braims_naming as naming
 
 DATA = Path("/data")
 RAW, BIDS, REPORTS, OUTBOX = DATA / "raw", DATA / "bids", DATA / "reports", DATA / "outbox"
 HERE = Path(__file__).resolve().parent
 BIDSMAP = BIDS / "code" / "bidscoin" / "bidsmap.yaml"
-POST = re.compile(r"(\bpost\b|postcontrast|post_?gd|\bpos\b|\bgd\b|gado|contrast|\+c\b)", re.I)
-PARTS = ["", "mag", "phase", "real", "imag"]
 
 
 def title(text):
@@ -38,50 +37,29 @@ def sh(*cmd, capture=False):
 
 
 def rules():
-    files = [DATA / "naming_rules_local.csv", HERE / "naming_rules.csv"]          # local rules win
-    return [r for f in files if f.exists() for r in csv.DictReader(f.open(encoding="utf-8")) if r["pattern"]]
+    return naming.rules(DATA / "naming_rules_local.csv", HERE / "naming_rules.csv")          # local rules win
 
 
 def name_series():
     """Apply the BRAIMS naming rules to every series type in the study bidsmap; return (series, result, note) rows."""
     table, rows = rules(), []
     bm = yaml.safe_load(BIDSMAP.read_text(encoding="utf-8"))
+    dcm2niix = bm.setdefault("Options", {}).setdefault("plugins", {}).setdefault("dcm2niix2bids", {})
+    dcm2niix["anon"] = "y"                              # round ages, drop acquisition dates (BIDScoin)
     dicom = bm["DICOM"]
     for key in ("height", "weight"):
-        dicom["participant"].pop(key, None)
+        (dicom.get("participant") or {}).pop(key, None)
     for run in dicom.get("exclude") or []:
         rows.append((run["attributes"].get("SeriesDescription", ""), "excluded", "derived image (BIDScoin)"))
     for dt in [k for k in dicom if k not in ("participant", "exclude")]:
         for run in list(dicom[dt] or []):
             a = run["attributes"]
             desc = str(a.get("SeriesDescription") or a.get("ProtocolName") or "")
-            mr = str(a.get("MRAcquisitionType") or "")
-            rule = next((r for r in table if re.search(r["pattern"], desc, re.I) and (not r["mr"] or r["mr"] == mr)), None)
-            if rule:
-                new, note = rule["datatype"], rule["why"]
-            elif dt == "extra_data":
-                new, note = "exclude", "NOT RECOGNIZED, so not converted. Send this series name to the core center."
-            else:
-                new, note = dt, "no BRAIMS rule: BIDScoin's own name kept. Check it."
-            if rule and new != "exclude":
-                acq = re.sub(r"[^A-Za-z0-9]", "", desc) if rule["acq"] == "=desc" else rule["acq"]
-                ce = "gadolinium" if rule["ce"] == "auto" and POST.search(desc) else None
-                part = PARTS + [PARTS.index(rule["part"]) if rule["part"] else 0]
-                if new == "dwi" and dt == "dwi":                  # keep BIDScoin's diffusion entry (it knows the phase-encoding dir)
-                    run["bids"]["acq"] = acq
-                elif new == "dwi":
-                    run["bids"] = {"acq": acq, "rec": None, "dir": "", "run": "<<>>", "part": part, "chunk": None, "suffix": "dwi"}
-                else:
-                    run["bids"] = {"task": None, "acq": acq, "ce": ce, "rec": None, "run": "<<>>", "echo": None, "part": part,
-                                   "chunk": None, "suffix": rule["suffix"]}
+            new, note = naming.name_run(run, dt, table, naming.dicom_hint(run.get("provenance", "")))
             if new != dt:
                 dicom[dt].remove(run)
                 dicom[new] = (dicom.get(new) or []) + [run]
-            b = run["bids"]
-            result = "excluded" if new == "exclude" else "_".join(
-                [f"{k}-{v}" for k, v in b.items() if k in ("acq", "ce") and v] +
-                ([f"part-{b['part'][b['part'][-1]]}"] if isinstance(b.get("part"), list) and b["part"][-1] else []) + [b["suffix"]])
-            rows.append((desc, f"{new}/{result}" if new != "exclude" else result, note))
+            rows.append((desc, naming.result_name(new, run), note))
     BIDSMAP.write_text(yaml.safe_dump(bm, sort_keys=False, allow_unicode=True), encoding="utf-8")
     return rows
 

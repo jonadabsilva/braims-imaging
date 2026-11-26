@@ -1,18 +1,25 @@
 pattern,mr,datatype,suffix,acq,ce,part,why
-"(_fa$|colfa|_adc|adc$|tracew|\btrace|\bfa\b|\bmip\b|mip_|minip|swi_images|^web\b|\blocali|\bloc\b|scout|survey|aahead|relat|report|entelai|icobrain|quantib|screen|capture|dose|\bteste?\b)",,exclude,,,,,"derived maps, processed images, reports and screen captures, localizers, previews, test sequences"
+"(_fa$|colfa|_adc|adc$|\badc\b|eadc|exp_?adc|apparent|diffusion coef|tracew|\btrace|\bfa\b|\bmip\b|mip_|minip|swi_images|^web\b|\blocali|\bloc\b|scout|survey|3-?pl\b|three.?plane|aahead|\bcal(ibration)?\b|relat|report|entelai|icobrain|quantib|screen|capture|dose|posdisp|\bdisp\b|\bmpr\b|reformat|\brfmt\b|\bteste?\b|\bperf|\bdsc\b|\bdce\b|\btof\b|angio|\bmra\b|\bmrv\b)",,exclude,,,,,"derived maps, processed images, reports and screen captures, localizers, reformats, previews, test sequences, perfusion and angiography (not collected)"
+"t1.?flair|flair.?t1",,anat,T1w,T1FLAIR,auto,,"T1-weighted FLAIR (GE): T1-weighted, not FLAIR"
 "dti|dwi|diff|ep2d_diff|resolve",,dwi,dwi,=desc,,,diffusion
-"psir",,anat,T1w,PSIR,,,phase-sensitive inversion recovery
-"(^|[^a-z])dir([^a-z]|$)|double.?inv",,anat,FLAIR,DIR,,,double inversion recovery
+"psir",,anat,T1w,PSIR,auto,,phase-sensitive inversion recovery
+"(^|[^a-z])dir([^a-z]|$)|double.?inv",,anat,FLAIR,DIR,auto,,double inversion recovery
 "^mag|mag_images|swi.*mag|mag.*swi",,anat,T2starw,SWI,,mag,SWI magnitude
 "^pha|pha_images|swi.*pha|pha.*swi",,anat,T2starw,SWI,,phase,SWI phase
-"orbit.*stir|stir.*orbit",,anat,T2w,orbitSTIR,,,orbit study (defaced with the orbits kept)
-"orbit.*t1|t1.*orbit",,anat,T1w,orbitT1,auto,,orbit study (defaced with the orbits kept)
-"orbit",,anat,T2w,orbit,,,orbit study (defaced with the orbits kept)
-"flair",3D,anat,FLAIR,3D,,,3D FLAIR
-"flair",,anat,FLAIR,2D,,,2D FLAIR
-"pd.?\+?.?t2|pdt2|dual.?echo",,anat,PDT2,2D,,,proton density and T2 (dual echo)
-"mprage",3D,anat,T1w,MPRAGE,auto,,3D T1 MPRAGE
-"t1|bravo|tfe",3D,anat,T1w,3D,auto,,other 3D T1
+"(orbit|optic|nervio|nervo|(^|[^a-z])nn.?oo([^a-z]|$)).*stir|stir.*(orbit|optic|nervio|nervo|(^|[^a-z])nn.?oo([^a-z]|$))",,anat,T2w,orbitSTIR,auto,,orbit study (defaced with the orbits kept)
+"(orbit|optic|nervio|nervo|(^|[^a-z])nn.?oo([^a-z]|$)).*t1|t1.*(orbit|optic|nervio|nervo|(^|[^a-z])nn.?oo([^a-z]|$))",,anat,T1w,orbitT1,auto,,orbit study (defaced with the orbits kept)
+"orbit|optic|nervio|nervo|(^|[^a-z])nn.?oo([^a-z]|$)",,anat,T2w,orbit,auto,,orbit study (defaced with the orbits kept)
+"mp2rage.*uni|uni.*mp2rage",,anat,UNIT1,MP2RAGE,auto,,MP2RAGE uniform image
+"mp2rage.*inv.?1|inv.?1.*mp2rage",,anat,MP2RAGE,MP2RAGEinv1,auto,,MP2RAGE first inversion
+"mp2rage.*inv.?2|inv.?2.*mp2rage",,anat,MP2RAGE,MP2RAGEinv2,auto,,MP2RAGE second inversion
+"flair|tirm|dark.?fluid|da-?fl",3D,anat,FLAIR,3D,auto,,3D FLAIR
+"flair|tirm|dark.?fluid|da-?fl",,anat,FLAIR,2D,auto,,2D FLAIR
+"t2\*|t2.?star|t2.?gre|gre.?t2|(^|[^a-z])gre([^a-z]|$)|fl2d|hemo|(^|[^a-z])merge([^a-z]|$)|(^|[^a-z])swan([^a-z]|$)|t2.?ffe|ffe.?t2",,anat,T2starw,GRE,auto,,T2*-weighted gradient echo
+"pd.?\+?.?t2|pdt2|dual.?echo",,anat,PDT2,2D,auto,,proton density and T2 (dual echo)
+"(^|[^a-z])pd([^a-z]|$)|proton",,anat,PDw,2D,auto,,proton density
+"mprage|mp-rage",3D,anat,T1w,MPRAGE,auto,,3D T1 MPRAGE
+"t1|bravo|tfe|fspgr|spgr|(^|[^a-z])ffe([^a-z]|$)",3D,anat,T1w,3D,auto,,other 3D T1
 "t1",,anat,T1w,SE,auto,,2D T1
-"t2",3D,anat,T2w,3D,,,3D T2
-"t2",,anat,T2w,2D,,,2D T2
+"stir",,anat,T2w,STIR,auto,,STIR
+"t2",3D,anat,T2w,3D,auto,,3D T2
+"t2",,anat,T2w,2D,auto,,2D T2
