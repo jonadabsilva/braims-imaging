@@ -25,6 +25,7 @@ With --reapply, an image whose mask is already saved there gets that mask (for e
 """
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 import numpy as np
 import nibabel as nib
@@ -47,6 +48,9 @@ APEXES = EYES + np.array(((12.0, -38.0, 3.0), (-12.0, -38.0, 3.0)))      # 12 mm
 HEAD_CENTRE = np.array((-5.4, 5.0, -12.5))
 HEAD_BOX = np.array(((-91.2, -94.9, -86.7), (75.7, 121.7, 83.3)))
 ORBIT_RADIUS = (24.0, 16.0)  # mm kept around the eye centre (12 mm beyond a normal eyeball) and at the apex
+GLOBE_FRONT = 15.0           # mm kept in front of the eye centre: the globe (~12 mm) + 3 mm, so the eyelids are removed
+EPI_MARGIN = 5.0             # mm added to the keep mask of diffusion images (EPI distortion near the orbits and forehead)
+DEFACE_VERSION = "1.1.0"
 ORBIT_UNSURE = 8.0           # mm added to both when the eye itself was not found in the image
 SCALES = (0.75, 1.33)        # plausible stretch of the template onto a head, along each axis
 EYE_SEARCH = 12.0            # mm from the expected eye centre within which the eye must be found
@@ -82,8 +86,10 @@ def orbit_cones(shape, affine, eyes, apexes, extra=0.0):
     for g, a in zip(eyes, apexes):
         ijk, xyz = voxels_near(shape, affine, (g + a) / 2, np.linalg.norm(a - g) / 2 + r_eye)
         v = a - g
-        u = np.clip(((xyz - g[:, None]) * v[:, None]).sum(0) / (v @ v), 0, 1)
+        t = ((xyz - g[:, None]) * v[:, None]).sum(0) / (v @ v)
+        u = np.clip(t, 0, 1)
         inside = np.linalg.norm(xyz - (g[:, None] + u * v[:, None]), axis=0) <= r_eye + (r_apex - r_eye) * u
+        inside &= -t * np.linalg.norm(v) <= GLOBE_FRONT + extra          # nothing in front of the globe: no eyelids
         keep[tuple(ijk[:, inside])] = True
     return keep
 
@@ -281,7 +287,24 @@ def reference(images):
         three_d = "/anat/" in p.as_posix() and sidecar(p)[1].get("MRAcquisitionType") == "3D"
         return (three_d and p.name.endswith("_T1w.nii.gz") and "ce-" not in p.name, three_d, "/anat/" in p.as_posix(),
                 nib.load(p).shape[2])
-    return max([p for p in images if "part-phase" not in p.name and "acq-orbit" not in p.name] or images, key=rank)
+    heads = [p for p in images if "part-phase" not in p.name and "acq-orbit" not in p.name and not is_held(p)
+             and "spine" not in p.name]
+    return max(heads, key=rank) if heads else None
+
+
+def is_held(img):
+    return bool(sidecar(img)[1].get("BRAIMSHold"))
+
+
+def hold(img, reason):
+    side, meta = sidecar(img)
+    meta["BRAIMSHold"] = reason
+    side.write_text(json.dumps(meta, indent=4))
+
+
+def original_of(img):
+    """The image as converted, before defacing: kept at the site so that a mask can be applied again from scratch."""
+    return saved / "orig" / img.relative_to(bids)
 
 
 def first_volume(img, out):
@@ -295,17 +318,28 @@ def saved_mask(img):
     return saved / img.relative_to(bids).parent / (img.name[:-7] + "_keepmask.nii.gz")
 
 
-def apply_keep(img, keep):
-    im = nib.load(img)
+def apply_keep(img, keep, margin=0.0):
+    """Zero what the keep mask removes, always starting from the converted image kept at the site. The mask is saved
+    first, so a mask edited later is newer than the image (that is how --reapply finds it)."""
+    orig = original_of(img)
+    if not orig.exists():                                 # first defacing: keep the converted image at the site
+        orig.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(img, orig)
+    im = nib.load(orig)
     data = np.asanyarray(im.dataobj)
     km = nib.load(keep)
     k = np.asanyarray(km.dataobj) > 0.5
-    out = data * (k[..., None] if data.ndim == 4 else k)
-    nib.Nifti1Image(out.astype(data.dtype), im.affine, im.header).to_filename(img)
     target = saved_mask(img)
     if Path(keep) != target:                              # keep a copy of the mask for checking and editing
         target.parent.mkdir(parents=True, exist_ok=True)
         nib.Nifti1Image(k.astype(np.uint8), km.affine).to_filename(target)
+    if margin:
+        zooms = np.array(km.header.get_zooms()[:3], float)
+        k = ndi.binary_dilation(k, ndi.generate_binary_structure(3, 1), iterations=max(1, int(round(margin / zooms.min()))))
+    out = data * (k[..., None] if data.ndim == 4 else k)
+    tmp = Path(str(img) + ".partial.nii.gz")
+    nib.Nifti1Image(out.astype(data.dtype), im.affine, im.header).to_filename(tmp)
+    tmp.replace(img)                                      # never a half-written image
     return 100 * (1 - k.mean())
 
 
@@ -322,32 +356,55 @@ def deface_session(session):
         return _deface_session(session, done, failed, look, out)
 
 
+def reapply_masks(session, images):
+    """Images whose saved mask was edited after the image was defaced get that mask again, from the kept original."""
+    done = 0
+    for img in images:
+        mask = saved_mask(img)
+        if not mask.exists() or is_held(img):
+            continue
+        if sidecar(img)[1].get("Defaced") is True and mask.stat().st_mtime <= img.stat().st_mtime:
+            continue                                      # mask not edited since this image was defaced
+        removed = apply_keep(img, mask)
+        side, meta = sidecar(img)
+        meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": "saved keep mask (checked or edited by hand)",
+                     "BRAIMSDefaceVersion": DEFACE_VERSION})
+        meta.pop("DefacingNote", None)
+        side.write_text(json.dumps(meta, indent=4))
+        done += 1
+        print(f"  done  {img.relative_to(session)}  (saved mask applied, {removed:.0f}% removed)")
+    return done
+
+
 def _deface_session(session, done, failed, look, out):
-    images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
-    if all(sidecar(p)[1].get("Defaced") is True for p in images):
+    images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz")) if not p.name.endswith(".partial.nii.gz")]
+    if reapply:
+        print(session.relative_to(bids))
+        done += reapply_masks(session, images)
+    if all(sidecar(p)[1].get("Defaced") is True or is_held(p) for p in images):
         return out.getvalue(), done, failed, look
-    print(session.relative_to(bids))
+    if not reapply:
+        print(session.relative_to(bids))
     repair(session)
-    images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
-    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True]
-    for img in list(todo):
-        if reapply and saved_mask(img).exists():
-            removed = apply_keep(img, saved_mask(img))
-            side, meta = sidecar(img)
-            meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": "saved keep mask (checked or edited by hand)"})
-            meta.pop("DefacingNote", None)
-            side.write_text(json.dumps(meta, indent=4))
-            todo.remove(img)
-            done += 1
-            print(f"  done  {img.relative_to(session)}  (saved mask applied, {removed:.0f}% removed)")
+    images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz")) if not p.name.endswith(".partial.nii.gz")]
+    for img in images:                                    # spine images: no validated defacing yet, so they stay here
+        if "spine" in img.name and not is_held(img):
+            hold(img, "spine: kept at the site until spine defacing is available")
+    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True and not is_held(p)]
     if not todo:
         return out.getvalue(), done, failed, look
     ref = reference(images)
+    if ref is None:                                       # orbit-only (or spine-only) session: no head image for the mask
+        for img in todo:
+            hold(img, "no head image in this session to place the face mask: kept at the site")
+            print(f"  HELD  {img.relative_to(session)}  (no head image in this session)")
+        return out.getvalue(), done, failed, look
     picture = saved / session.relative_to(bids) / f"{'_'.join(session.relative_to(bids).parts)}_deface_check.png"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         # 1. Neck (robustfov) and face (pydeface's mask, orbits kept) on the reference image -> a keep mask on its own grid
-        original = first_volume(ref, tmp / ref.name)      # register from the untouched copy
+        source = original_of(ref) if original_of(ref).exists() else ref
+        original = first_volume(source, tmp / ref.name)   # register from the untouched copy
         try:
             if sidecar(ref)[1].get("Defaced") is True:    # defaced in an earlier run: its saved mask is the session's
                 keep_ref, placed, unsure = saved_mask(ref), None, bool(sidecar(ref)[1].get("DefacingNote"))
@@ -368,7 +425,8 @@ def _deface_session(session, done, failed, look, out):
             mag = Path(str(img).replace("part-phase", "part-mag"))
             how = f"robustfov + pydeface's face mask placed by {placed}, orbits kept"
             try:
-                target = first_volume(img, tmp / f"{img.name[:-7]}_vol0.nii.gz")
+                target = first_volume(original_of(img) if original_of(img).exists() else img,
+                                      tmp / f"{img.name[:-7]}_vol0.nii.gz")
                 keep = tmp / f"{img.name[:-7]}_keep.nii.gz"
                 if img == ref:
                     keep = keep_ref
@@ -389,7 +447,7 @@ def _deface_session(session, done, failed, look, out):
                         by_coordinates(keep_ref, target, keep)
                         how = f"the keep mask of {ref.name}, moved here by the scanner coordinates"
                 masks[img] = keep
-                removed = apply_keep(img, keep)
+                removed = apply_keep(img, keep, EPI_MARGIN if "/dwi/" in img.as_posix() else 0.0)
             except Exception as e:                        # an image that cannot be read at all
                 print(f"  NOT DEFACED  {img.relative_to(session)}  ({e})")
                 failed.append(img)
@@ -398,7 +456,7 @@ def _deface_session(session, done, failed, look, out):
                 qc.before_after(original, img, picture)
                 print(f"  check picture: {picture.relative_to(bids)}")
             side, meta = sidecar(img)
-            meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": how})
+            meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": how, "BRAIMSDefaceVersion": DEFACE_VERSION})
             if unsure:
                 meta["DefacingNote"] = "no placement of the face mask passed the checks: look at the check picture"
             side.write_text(json.dumps(meta, indent=4))
@@ -408,15 +466,40 @@ def _deface_session(session, done, failed, look, out):
     return out.getvalue(), done, failed, look
 
 
-done, failed, look = 0, [], []
-sessions = sorted({p.parent.parent for d in ("anat", "dwi") for p in bids.glob(f"sub-*/**/{d}/*.nii.gz")})
-workers = max(1, min(len(sessions), os.cpu_count() or 1))     # one session per processor: FLIRT uses one each
-with ProcessPoolExecutor(workers) as pool:
-    for text, n, bad, unsure in pool.map(deface_session, sessions):
+def workers_for(n_sessions):
+    """One session per processor (FLIRT uses one each), but no more than the memory allows (~2 GB per session)."""
+    cpus = os.cpu_count() or 1
+    try:
+        with open("/proc/meminfo") as h:
+            avail = next(int(line.split()[1]) for line in h if line.startswith("MemAvailable")) / 1024 ** 2
+    except (OSError, StopIteration, ValueError):
+        avail = 2.0 * cpus
+    return max(1, min(n_sessions, cpus, int(avail // 2)))
+
+
+def main():
+    done, failed, look = 0, [], []
+    sessions = sorted({p.parent.parent for d in ("anat", "dwi") for p in bids.glob(f"sub-*/**/{d}/*.nii.gz")
+                       if "derivatives" not in p.relative_to(bids).parts})
+    results, left = [], list(sessions)
+    try:
+        with ProcessPoolExecutor(workers_for(len(sessions))) as pool:
+            for session, result in zip(sessions, pool.map(deface_session, sessions)):
+                results.append(result)
+                left.remove(session)
+    except BrokenProcessPool:                             # a worker was killed (usually: out of memory)
+        print(f"Out of memory or a crash with several sessions at once: {len(left)} session(s) again, one at a time.")
+    for session in left:
+        results.append(deface_session(session))
+    for text, n, bad, unsure in results:
         print(text, end="", flush=True)
         done, failed, look = done + n, failed + bad, look + unsure
-print(f"\n{done} image(s) defaced. Look at one image per session before you go on.")
-if look:
-    print(f"{len(look)} session(s) need a look at their check picture first: " + ", ".join(str(s.relative_to(bids)) for s in look))
-if failed:
-    print(f"{len(failed)} image(s) could not be read. They stay at the site: the BRAIMS check will not package them.")
+    print(f"\n{done} image(s) defaced. Look at one image per session before you go on.")
+    if look:
+        print(f"{len(look)} session(s) need a look at their check picture first: " + ", ".join(str(s.relative_to(bids)) for s in look))
+    if failed:
+        print(f"{len(failed)} image(s) could not be read. They stay at the site: the BRAIMS check will not package them.")
+
+
+if __name__ == "__main__":
+    main()
