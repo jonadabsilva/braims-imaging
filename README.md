@@ -67,9 +67,14 @@ narrowing to 16 mm at the apex (`EYES`, `APEXES` and `ORBIT_RADIUS` in `braims/b
 eye the cone stops 3 mm beyond the globe (`GLOBE_FRONT`), so the eyelids are removed with the rest of the face. The
 nose, mouth, cheeks, chin and neck are removed.
 
-Some images stay at the site, listed in the report (`BRAIMSHold` in the sidecar): spine series, until a validated
-spine defacing exists; series that only possibly show the spine (a long sagittal field of view), until a person
-decides; and sessions with no head image to place the face mask on (orbit studies alone).
+Spine series are recognized (by name, DICOM body part, exam description) and are not defaced: spine images need no
+defacing (`DefacingMethod: "not needed: spine image"`). Some images stay at the site, listed in the report
+(`BRAIMSHold` in the sidecar): series that only possibly show the spine (a long sagittal field of view), until a
+person decides; and sessions with no head image to place the face mask on (orbit studies alone).
+
+Below the neck cut, the brainstem, upper cervical cord and vertebrae are kept (everything more than 15 mm behind the
+orbital apexes); the jaw, mouth and chin are removed. A brain mask (FSL bet2) is made on the reference image: if more
+than 2 cm3 of brain falls in the removed region, the session is marked for a look (`DefacingNote`).
 
 Every image is defaced: each step has a fallback, so that no image stays behind because of the tool.
 
@@ -102,6 +107,10 @@ defacing logic, pre-flight). End to end with the real tools: `tests/make_exams.p
 heads (adult, child, tilted, with spine, orbits only), then `tests/e2e_assert.py` checks the result (see the files).
 
 To build the image yourself: `docker build -f docker/Dockerfile -t braims .`
+
+Hospitals without internet access to `ghcr.io`: on a computer with access, `docker pull ghcr.io/jonadabsilva/braims:1.1.0`
+then `docker save ghcr.io/jonadabsilva/braims:1.1.0 -o braims-1.1.0.tar`; copy the file, then on the hospital computer
+`docker load -i braims-1.1.0.tar`. The launchers then work offline.
 
 ## Versions
 
