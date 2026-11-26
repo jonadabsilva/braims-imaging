@@ -49,6 +49,8 @@ HEAD_CENTRE = np.array((-5.4, 5.0, -12.5))
 HEAD_BOX = np.array(((-91.2, -94.9, -86.7), (75.7, 121.7, 83.3)))
 ORBIT_RADIUS = (24.0, 16.0)  # mm kept around the eye centre (12 mm beyond a normal eyeball) and at the apex
 GLOBE_FRONT = 15.0           # mm kept in front of the eye centre: the globe (~12 mm) + 3 mm, so the eyelids are removed
+LID_RADIUS = 22.0            # mm around each eye's axis in which everything in front of the globe is removed (eyelids,
+                             # brow skin): pydeface's own mask keeps the upper face down to just below the eyes
 EPI_MARGIN = 5.0             # mm added to the keep mask of diffusion images (EPI distortion near the orbits and forehead)
 DEFACE_VERSION = "1.1.0"
 ORBIT_UNSURE = 8.0           # mm added to both when the eye itself was not found in the image
@@ -92,6 +94,21 @@ def orbit_cones(shape, affine, eyes, apexes, extra=0.0):
         inside &= -t * np.linalg.norm(v) <= GLOBE_FRONT + extra          # nothing in front of the globe: no eyelids
         keep[tuple(ijk[:, inside])] = True
     return keep
+
+
+def lid_zone(shape, affine, eyes, apexes, extra=0.0):
+    """In front of each globe (beyond GLOBE_FRONT, + extra when the eye was not found), within LID_RADIUS of the eye's
+    axis: the eyelids and the skin around them. Removed whatever the face mask says."""
+    zone = np.zeros(shape[:3], bool)
+    for g, a in zip(eyes, apexes):
+        front = (g - a) / np.linalg.norm(g - a)
+        ijk, xyz = voxels_near(shape, affine, g + front * (GLOBE_FRONT + 30) / 2, (30 - GLOBE_FRONT) / 2 + LID_RADIUS + 10)
+        d = xyz - g[:, None]
+        along = front @ d
+        across = np.linalg.norm(d - np.outer(front, along), axis=0)
+        inside = (along > GLOBE_FRONT + extra) & (across <= LID_RADIUS)
+        zone[tuple(ijk[:, inside])] = True
+    return zone
 
 
 def eye_kernels(mm):
@@ -247,6 +264,7 @@ def face_and_neck(ref, tmp):
             eyes = expected
         apexes = apexes + eyes - expected
         orbits = orbit_cones(img.shape, img.affine, eyes, apexes, 0 if found else ORBIT_UNSURE)
+        face = face & ~lid_zone(img.shape, img.affine, eyes, apexes, 0 if found else ORBIT_UNSURE)
         nose, ratio = cut_checks(img, tissue, face, orbits, eyes, apexes)
         passed = found and nose <= NOSE_LEFT and LOPSIDED[0] <= ratio <= LOPSIDED[1]
         tried.append((passed, found, -nose, name, face | orbits))

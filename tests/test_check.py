@@ -142,3 +142,23 @@ def test_dwi_without_bval_is_an_error(bids):
     image(bids / SUB / SES / "dwi" / f"{SUB}_{SES}_acq-DTI_dwi.nii.gz")
     code, out = run(bids)
     assert ".bval" in out and code == 1
+
+
+def test_tables_list_only_what_is_packaged(bids, tmp_path):
+    for stray in ("dicom_backup", "site_key_copy.xlsx", "screenshot.png"):
+        p = bids / stray
+        __import__("shutil").rmtree(p) if p.is_dir() else p.unlink()
+    (bids / SUB / SES / "anat" / "notes.txt").unlink()
+    held = "sub-BR010005"
+    image(bids / held / SES / "anat" / f"{held}_{SES}_acq-orbitSTIR_T2w.nii.gz", meta={"BRAIMSHold": "no head image"})
+    (bids / held / SES / f"{held}_{SES}_scans.tsv").write_text(f"filename\tacq_time\nanat/{held}_{SES}_acq-orbitSTIR_T2w.nii.gz\tn/a\n")
+    (bids / held / f"{held}_sessions.tsv").write_text("session_id\tdays_from_baseline\nses-01\t0\n")
+    with open(bids / "participants.tsv", "a") as h:
+        h.write(f"{held}\t40\tF\n")
+    run(bids, "--fix")
+    code, out = run(bids, "--package", str(tmp_path / "p.zip"))
+    assert code == 0, out
+    z = zipfile.ZipFile(tmp_path / "p.zip")
+    assert not any(held in n for n in z.namelist())
+    assert held.encode() not in z.read("participants.tsv")
+    assert b"sub-BR010001" in z.read("participants.tsv")

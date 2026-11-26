@@ -478,21 +478,54 @@ def package_items(bids):
             and f.name.split(".")[0] not in hold]
 
 
+def filtered_table(f, bids, images_in):
+    """A table as it goes into the package: only rows about images, sessions and people that are in the package.
+    None when no row is left."""
+    rows, _ = read_table(f)
+    if not rows:
+        return None
+    rel = f.relative_to(bids)
+    if f.name.endswith("_scans.tsv"):
+        ses = rel.parent.as_posix()
+        keep = [r for r in rows[1:] if f"{ses}/{r[0]}" in images_in]
+    elif f.name.endswith("_sessions.tsv"):
+        keep = [r for r in rows[1:] if any(i.startswith(f"{rel.parent.as_posix()}/{r[0]}/") for i in images_in)]
+    elif f.name == "participants.tsv":
+        keep = [r for r in rows[1:] if any(i.startswith(f"{r[0]}/") for i in images_in)]
+    else:
+        keep = rows[1:]
+    if not keep:
+        return None
+    buf = io.StringIO()
+    csv.writer(buf, delimiter="\t", lineterminator="\n").writerows([rows[0]] + keep)
+    return buf.getvalue().encode("utf-8")
+
+
 def package(bids, target):
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     items = package_items(bids)
+    images_in = {f.relative_to(bids).as_posix() for f in items if f.name.endswith(".nii.gz")}
     lines = ["file\tbytes\tsha256"]
     tmp = target.with_suffix(".partial")
+    count = 0
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
         for f in items:
             rel = f.relative_to(bids).as_posix()
-            digest = hashlib.sha256()
-            with open(f, "rb") as h:
-                while chunk := h.read(1 << 20):
-                    digest.update(chunk)
-            z.write(f, rel)
-            lines.append(f"{rel}\t{f.stat().st_size}\t{digest.hexdigest()}")
+            if f.suffix == ".tsv":
+                data = filtered_table(f, bids, images_in)
+                if data is None:
+                    continue
+                z.writestr(rel, data)
+                lines.append(f"{rel}\t{len(data)}\t{hashlib.sha256(data).hexdigest()}")
+            else:
+                digest = hashlib.sha256()
+                with open(f, "rb") as h:
+                    while chunk := h.read(1 << 20):
+                        digest.update(chunk)
+                z.write(f, rel)
+                lines.append(f"{rel}\t{f.stat().st_size}\t{digest.hexdigest()}")
+            count += 1
         z.writestr("manifest.tsv", "\n".join(lines) + "\n")
     tmp.replace(target)
     digest = hashlib.sha256()
@@ -500,7 +533,7 @@ def package(bids, target):
         while chunk := h.read(1 << 20):
             digest.update(chunk)
     Path(str(target) + ".sha256").write_text(f"{digest.hexdigest()}  {target.name}\n")
-    print(f"\nPackage: {target}  ({len(items)} files, {target.stat().st_size / 1e6:.1f} MB)")
+    print(f"\nPackage: {target}  ({count} files, {target.stat().st_size / 1e6:.1f} MB)")
     print(f"SHA-256: {digest.hexdigest()}")
 
 

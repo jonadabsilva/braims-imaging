@@ -134,3 +134,15 @@ def test_orbit_only_session_is_held(D, tmp_path):
 def test_workers_respect_memory(D):
     assert 1 <= D.workers_for(100) <= (os.cpu_count() or 1)
     assert D.workers_for(1) == 1
+
+
+def test_lid_zone_is_in_front_of_the_globe_only(D):
+    g, ap = D.EYES[0], D.APEXES[0]
+    aff = np.eye(4)
+    aff[:3, 3] = g - 60
+    zone = D.lid_zone((121, 121, 121), aff, D.EYES[:1], D.APEXES[:1])
+    xyz = nib.affines.apply_affine(aff, np.argwhere(zone)) - g
+    front = (g - ap) / np.linalg.norm(g - ap)
+    assert zone.any() and np.min(xyz @ front) > D.GLOBE_FRONT                 # never the globe, never behind it
+    keep = D.orbit_cones((121, 121, 121), aff, D.EYES[:1], D.APEXES[:1])
+    assert not (zone & keep).any()                                           # never the orbit contents
