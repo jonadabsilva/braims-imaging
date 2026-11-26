@@ -63,6 +63,13 @@ def main():
     for label, pt in (("frontal pole", (-15, 55, 0)), ("frontal pole", (15, 55, 0)), ("orbitofrontal cortex", (-10, 40, -20)),
                       ("orbitofrontal cortex", (10, 40, -20)), ("forehead brain above the eyes", (-30, 45, 5))):
         check(f"adult: {label} at {pt} kept", np.mean(sample(im, np.array(pt, float), 3) > 0) == 1.0)
+    medulla, mouth = np.array((0.0, -40.0, -70.0)), np.array((0.0, 75.0, -72.0))
+    orig_t1 = nib.load(bids / "derivatives" / "braims_deface" / "orig" / t1.relative_to(bids))
+    if np.mean(sample(orig_t1, medulla, 3) > 0) == 1.0:
+        check("adult: brainstem/upper cord below the neck cut kept", np.mean(sample(im, medulla, 3) > 0) == 1.0)
+    if np.mean(sample(orig_t1, mouth, 3) > 0) > 0.5:
+        check("adult: mouth below the neck cut removed", np.mean(sample(im, mouth, 3) > 0) < 0.05)
+    check("adult: no brain-cut flag", not meta(t1).get("DefacingNote"), meta(t1).get("DefacingNote"))
     check("adult: defaced sidecar", meta(t1).get("Defaced") is True and meta(t1).get("BRAIMSDefaceVersion"))
     for p in anat("sub-BR010001"):
         if "orbit" in p.name:
@@ -82,7 +89,8 @@ def main():
     # holds
     spine = [p for p in anat("sub-BR010004") if "spine" in p.name]
     check("spine: both series converted and named", len(spine) == 2, [p.name for p in anat("sub-BR010004")])
-    check("spine: held, not defaced with the brain mask", spine and all(meta(p).get("BRAIMSHold") and not meta(p).get("Defaced") for p in spine))
+    check("spine: not defaced, not held (policy)", spine and all(not meta(p).get("BRAIMSHold") and not meta(p).get("Defaced")
+                                                                    and meta(p).get("DefacingMethod", "").startswith("not needed") for p in spine))
     brain4 = [p for p in anat("sub-BR010004") if "spine" not in p.name]
     check("spine session: brain images defaced", brain4 and all(meta(p).get("Defaced") for p in brain4))
     orbit_only = anat("sub-BR010005")
@@ -105,7 +113,8 @@ def main():
         leaks = [s for s in SECRETS if s in blob]
         check("package: no identifier in sidecars or tables", not leaks, leaks)
         check("package: no text in image headers", not re.search(rb"SILVA|JOAO|Hospital", heads))
-        check("package: no held image", not any("spine" in n or "BR010005" in n for n in names))
+        check("package: no held image", not any("BR010005" in n for n in names))
+        check("package: spine images included", sum("spine" in n and n.endswith(".nii.gz") for n in names) == 2)
         check("package: no derivatives, code or originals", not any(n.split("/")[0] in ("derivatives", "code") for n in names))
         side = json.loads(zipfile.ZipFile(zips[-1]).read(next(n for n in names if n.endswith("MPRAGE_T1w.json"))))
         check("package: acquisition parameters kept", all(k in side for k in ("EchoTime", "RepetitionTime", "Manufacturer",

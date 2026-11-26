@@ -162,3 +162,16 @@ def test_tables_list_only_what_is_packaged(bids, tmp_path):
     assert not any(held in n for n in z.namelist())
     assert held.encode() not in z.read("participants.tsv")
     assert b"sub-BR010001" in z.read("participants.tsv")
+
+
+def test_spine_without_defacing_is_packaged(bids, tmp_path):
+    for stray in ("dicom_backup", "site_key_copy.xlsx", "screenshot.png"):
+        p = bids / stray
+        __import__("shutil").rmtree(p) if p.is_dir() else p.unlink()
+    (bids / SUB / SES / "anat" / "notes.txt").unlink()
+    image(bids / SUB / SES / "anat" / f"{SUB}_{SES}_acq-cspineSagT2_T2w.nii.gz", defaced=False,
+          meta={"BRAIMSRegion": "spine", "DefacingMethod": "not needed: spine image"})
+    run(bids, "--fix")
+    code, out = run(bids, "--package", str(tmp_path / "p.zip"))
+    assert code == 0, out
+    assert any("cspine" in n for n in zipfile.ZipFile(tmp_path / "p.zip").namelist())

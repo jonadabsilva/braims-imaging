@@ -2,7 +2,7 @@
 
 Matching ignores accents and case (ÓRBITA = orbita). The first rule of naming_rules.csv that matches wins.
 Spine series are recognised before the rules (by name, by the DICOM body part, by the exam description and by the
-field of view) and named acq-<region><plane><contrast>; they are held at the site until spine defacing exists.
+field of view) and named acq-<region><plane><contrast>; spine images are not defaced (BRAIMS policy).
 """
 import csv, re, unicodedata
 from pathlib import Path
@@ -140,12 +140,12 @@ def name_run(run, datatype, table, hint=None):
         else:
             meta["BRAIMSRegion"] = "spine"
             meta["BodyPart"] = {"cspine": "CSPINE", "tspine": "TSPINE", "lspine": "LSPINE"}.get(region, "SPINE")
-            meta["BRAIMSHold"] = "spine: kept at the site until spine defacing is available"
+            meta["DefacingMethod"] = "not needed: spine image"
         if region != "possible":
             acq = f"{region}{plane_tag(desc, hint)}{contrast_tag(desc)}"
             suffix_rule = rule if rule and rule["datatype"] == "anat" else {"suffix": "T2w", "part": ""}
             run["bids"] = bids_entry("anat", suffix_rule, desc, acq, "gadolinium" if post else None)
-            return "anat", f"spine ({how}): held at the site until spine defacing is available"
+            return "anat", f"spine ({how}): not defaced (spine images need no defacing)"
     if rule:
         new = rule["datatype"]
         acq = re.sub(r"[^A-Za-z0-9]", "", desc) if rule["acq"] == "=desc" else rule["acq"]

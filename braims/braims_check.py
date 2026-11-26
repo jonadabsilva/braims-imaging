@@ -303,7 +303,10 @@ def check_images(bids, cache):
             stem = f.name[:-7]
             if not ((f.parent / (stem + ".bval")).exists() and (f.parent / (stem + ".bvec")).exists()):
                 report("ERROR", rel, "diffusion image without its .bval/.bvec files")
-        if meta.get("Defaced") is not True:
+        spine = "spine" in f.name or meta.get("BRAIMSRegion") == "spine"
+        if spine and meta.get("Defaced") is not True:
+            report("NOTE", rel, "spine image: not defaced (not needed)")
+        elif meta.get("Defaced") is not True:
             report("ERROR", rel, "not defaced: run the defacing step")
         elif meta.get("DefacingNote"):
             report("WARNING", rel, "defaced, but no placement of the face mask passed the checks: look at the session's "
@@ -575,6 +578,7 @@ def main():
     show("FIXED")
     errors, warnings = show("ERROR"), show("WARNING")
     holds = show("HOLD")
+    show("NOTE")
     print(f"\n{errors} error(s), {warnings} warning(s), {holds} image(s) held at the site.")
     if errors:
         print("Run again with --fix, then check again. Nothing is uploaded while errors remain.")

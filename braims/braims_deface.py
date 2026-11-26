@@ -49,6 +49,9 @@ HEAD_CENTRE = np.array((-5.4, 5.0, -12.5))
 HEAD_BOX = np.array(((-91.2, -94.9, -86.7), (75.7, 121.7, 83.3)))
 ORBIT_RADIUS = (24.0, 16.0)  # mm kept around the eye centre (12 mm beyond a normal eyeball) and at the apex
 GLOBE_FRONT = 15.0           # mm kept in front of the eye centre: the globe (~12 mm) + 3 mm, so the eyelids are removed
+NECK_BEHIND = 15.0           # mm behind the orbital apexes from which the neck is kept below the neck cut (brainstem,
+                             # upper cervical cord, vertebrae); everything in front of it (jaw, mouth, chin) is removed
+BRAIN_CUT_CC = 2.0           # cm3 of brain (FSL bet2) inside the removed region above which a person must look
 LID_RADIUS = 22.0            # mm around each eye's axis in which everything in front of the globe is removed (eyelids,
                              # brow skin): pydeface's own mask keeps the upper face down to just below the eyes
 EPI_MARGIN = 5.0             # mm added to the keep mask of diffusion images (EPI distortion near the orbits and forehead)
@@ -109,6 +112,24 @@ def lid_zone(shape, affine, eyes, apexes, extra=0.0):
         inside = (along > GLOBE_FRONT + extra) & (across <= LID_RADIUS)
         zone[tuple(ijk[:, inside])] = True
     return zone
+
+
+def behind(shape, affine, eyes, apexes):
+    """Voxels more than NECK_BEHIND mm behind the plane through both orbital apexes (the head's own front direction)."""
+    front = (eyes - apexes).mean(0)
+    front /= np.linalg.norm(front)
+    xyz = affine[:3, :3] @ np.indices(shape[:3]).reshape(3, -1) + affine[:3, 3:4]
+    return ((front @ (xyz - apexes.mean(0)[:, None])) < -NECK_BEHIND).reshape(shape[:3])
+
+
+def brain_removed(crop, img, keep, tmp):
+    """cm3 of brain (FSL bet2 on the reference image) that the keep mask would remove; None when bet2 is not available."""
+    try:
+        run("bet2", crop, tmp / "brain", "-m", "-n", "-f", "0.5")
+        brain = np.asanyarray(nib.load(tmp / "brain_mask.nii.gz").dataobj) > 0
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    return float((brain & ~keep).sum() * abs(np.linalg.det(img.affine[:3, :3])) / 1000)
 
 
 def eye_kernels(mm):
@@ -267,16 +288,22 @@ def face_and_neck(ref, tmp):
         face = face & ~lid_zone(img.shape, img.affine, eyes, apexes, 0 if found else ORBIT_UNSURE)
         nose, ratio = cut_checks(img, tissue, face, orbits, eyes, apexes)
         passed = found and nose <= NOSE_LEFT and LOPSIDED[0] <= ratio <= LOPSIDED[1]
-        tried.append((passed, found, -nose, name, face | orbits))
+        tried.append((passed, found, -nose, name, face | orbits, eyes, apexes))
         if passed:
             break
-    passed, _, _, name, keep = max(tried, key=lambda t: t[:3])
+    passed, _, _, name, keep, eyes, apexes = max(tried, key=lambda t: t[:3])
+    note = None
+    cut = brain_removed(crop, img, keep, tmp)
+    if cut is not None and cut > BRAIN_CUT_CC:
+        passed, note = False, f"{cut:.1f} cm3 of brain may have been removed: look at the check picture"
     whole = nib.load(up)
-    keep = on_grid(keep, img.affine, whole.shape, whole.affine)             # outside the neck cut: removed
+    inside = on_grid(np.ones(img.shape[:3], bool), img.affine, whole.shape, whole.affine)
+    keep = on_grid(keep, img.affine, whole.shape, whole.affine)
+    keep |= ~inside & behind(whole.shape, whole.affine, eyes, apexes)      # below the neck cut: keep the cord, not the jaw
     back = nib.orientations.ornt_transform(nib.io_orientation(whole.affine), nib.io_orientation(native.affine))
     keep = nib.orientations.apply_orientation(keep, back)
     nib.Nifti1Image(keep.astype(np.uint8), native.affine).to_filename(tmp / "keep_ref.nii.gz")
-    return tmp / "keep_ref.nii.gz", name, not passed
+    return tmp / "keep_ref.nii.gz", name, (note or True) if not passed else False
 
 
 def landmarks(out):
@@ -306,8 +333,15 @@ def reference(images):
         return (three_d and p.name.endswith("_T1w.nii.gz") and "ce-" not in p.name, three_d, "/anat/" in p.as_posix(),
                 nib.load(p).shape[2])
     heads = [p for p in images if "part-phase" not in p.name and "acq-orbit" not in p.name and not is_held(p)
-             and "spine" not in p.name]
+             and not is_spine(p)]
     return max(heads, key=rank) if heads else None
+
+
+NOT_NEEDED = "not needed: spine image"
+
+
+def is_spine(img):
+    return "spine" in img.name or sidecar(img)[1].get("BRAIMSRegion") == "spine"
 
 
 def is_held(img):
@@ -399,20 +433,25 @@ def _deface_session(session, done, failed, look, out):
     if reapply:
         print(session.relative_to(bids))
         done += reapply_masks(session, images)
-    if all(sidecar(p)[1].get("Defaced") is True or is_held(p) for p in images):
+    if all(sidecar(p)[1].get("Defaced") is True or is_held(p) or (is_spine(p) and sidecar(p)[1].get("DefacingMethod") == NOT_NEEDED)
+           for p in images):
         return out.getvalue(), done, failed, look
     if not reapply:
         print(session.relative_to(bids))
     repair(session)
     images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz")) if not p.name.endswith(".partial.nii.gz")]
-    for img in images:                                    # spine images: no validated defacing yet, so they stay here
-        if "spine" in img.name and not is_held(img):
-            hold(img, "spine: kept at the site until spine defacing is available")
-    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True and not is_held(p)]
+    for img in images:                                    # spine images need no defacing (BRAIMS policy)
+        if is_spine(img):
+            side, meta = sidecar(img)
+            if meta.get("BRAIMSHold", "").startswith("spine"):
+                meta.pop("BRAIMSHold")
+            meta.update({"BRAIMSRegion": "spine", "DefacingMethod": NOT_NEEDED})
+            side.write_text(json.dumps(meta, indent=4))
+    todo = [p for p in images if sidecar(p)[1].get("Defaced") is not True and not is_held(p) and not is_spine(p)]
     if not todo:
         return out.getvalue(), done, failed, look
     ref = reference(images)
-    if ref is None:                                       # orbit-only (or spine-only) session: no head image for the mask
+    if ref is None:                                       # orbit-only session: no head image for the mask
         for img in todo:
             hold(img, "no head image in this session to place the face mask: kept at the site")
             print(f"  HELD  {img.relative_to(session)}  (no head image in this session)")
@@ -436,7 +475,7 @@ def _deface_session(session, done, failed, look, out):
             print(f"  face mask placed by {placed}, on {ref.name}")
         if unsure:
             look.append(session)
-            print("  LOOK  no placement of the face mask passed the checks: the best one was used. Look at the check picture.")
+            print(f"  LOOK  {unsure if isinstance(unsure, str) else 'no placement of the face mask passed the checks: the best one was used'}. Look at the check picture.")
         # 2. The same mask on every other image of the session
         masks = {}
         for img in todo:
@@ -474,9 +513,10 @@ def _deface_session(session, done, failed, look, out):
                 qc.before_after(original, img, picture)
                 print(f"  check picture: {picture.relative_to(bids)}")
             side, meta = sidecar(img)
-            meta.update({"Defaced": True, "NeckRemoved": True, "DefacingMethod": how, "BRAIMSDefaceVersion": DEFACE_VERSION})
+            meta.update({"Defaced": True, "NeckRemoved": False, "DefacingMethod": how + "; neck kept behind the face",
+                         "BRAIMSDefaceVersion": DEFACE_VERSION})
             if unsure:
-                meta["DefacingNote"] = "no placement of the face mask passed the checks: look at the check picture"
+                meta["DefacingNote"] = unsure if isinstance(unsure, str) else "no placement of the face mask passed the checks: look at the check picture"
             side.write_text(json.dumps(meta, indent=4))
             done += 1
             print(f"  done  {img.relative_to(session)}  ({removed:.0f}% of the volume removed"

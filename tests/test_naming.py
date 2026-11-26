@@ -115,10 +115,11 @@ def test_name(tmp_path, case):
     assert got[case[0]][0] == case[3]
 
 
-def test_spine_is_held_and_labelled(tmp_path):
+def test_spine_is_labelled_and_not_held(tmp_path):
     _, bm = run_names(tmp_path, [("SAG T2 COLUNA CERVICAL", "2D", "anat", "", {})])
     meta = bm["DICOM"]["anat"][0]["meta"]
-    assert meta["BodyPart"] == "CSPINE" and meta["BRAIMSRegion"] == "spine" and "spine" in meta["BRAIMSHold"]
+    assert meta["BodyPart"] == "CSPINE" and meta["BRAIMSRegion"] == "spine"
+    assert meta["DefacingMethod"].startswith("not needed") and "BRAIMSHold" not in meta
 
 
 def test_long_sagittal_field_of_view_is_held_for_a_person(tmp_path):

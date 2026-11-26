@@ -9,6 +9,7 @@ RUN micromamba create -y -p /opt/fslbet -c https://fsl.fmrib.ox.ac.uk/fsldownloa
 FROM marcelzwiers/bidscoin:4.6.2
 COPY --from=fsl /opt/fslbet /opt/fslbet
 RUN ln -s /opt/fslbet/bin/robustfov /usr/local/bin/robustfov \
+ && ln -s /opt/fslbet/bin/bet2 /usr/local/bin/bet2 \
  && pip install --no-cache-dir pillow scipy pyyaml
 COPY braims /opt/braims
 ENV PYTHONUNBUFFERED=1

@@ -120,14 +120,16 @@ def test_diffusion_mask_gets_a_margin(D, tmp_path):
     assert d.shape == (40, 40, 30, 3) and d[7, 20, 15, 2] == 5.0 and d[2, 20, 15, 0] == 0
 
 
-def test_orbit_only_session_is_held(D, tmp_path):
+def test_orbit_only_session_is_held_and_spine_needs_no_defacing(D, tmp_path):
     setup_bids(D, tmp_path)
     ses = tmp_path / "sub-BR010005" / "ses-01"
     image(ses / "anat" / "sub-BR010005_ses-01_acq-orbitSTIR_T2w.nii.gz", (40, 40, 16), "2D")
     image(ses / "anat" / "sub-BR010005_ses-01_acq-cspineSagT2_T2w.nii.gz", (40, 40, 16), "2D")
     text, done, failed, look = D.deface_session(ses)
-    metas = [json.loads(p.read_text()) for p in sorted((ses / "anat").glob("*.json"))]
-    assert all(m.get("BRAIMSHold") for m in metas) and not any(m.get("Defaced") for m in metas)
+    orbit = json.loads((ses / "anat" / "sub-BR010005_ses-01_acq-orbitSTIR_T2w.json").read_text())
+    spine = json.loads((ses / "anat" / "sub-BR010005_ses-01_acq-cspineSagT2_T2w.json").read_text())
+    assert orbit.get("BRAIMSHold") and not orbit.get("Defaced")
+    assert not spine.get("BRAIMSHold") and not spine.get("Defaced") and spine["DefacingMethod"] == D.NOT_NEEDED
     assert done == 0 and not failed
 
 
@@ -146,3 +148,13 @@ def test_lid_zone_is_in_front_of_the_globe_only(D):
     assert zone.any() and np.min(xyz @ front) > D.GLOBE_FRONT                 # never the globe, never behind it
     keep = D.orbit_cones((121, 121, 121), aff, D.EYES[:1], D.APEXES[:1])
     assert not (zone & keep).any()                                           # never the orbit contents
+
+
+def test_neck_kept_only_behind_the_orbital_apexes(D):
+    aff = np.eye(4)
+    aff[:3, 3] = (-60, -100, -120)
+    keep = D.behind((120, 200, 60), aff, D.EYES, D.APEXES)
+    xyz = nib.affines.apply_affine(aff, np.argwhere(keep))
+    front = (D.EYES - D.APEXES).mean(0)
+    front /= np.linalg.norm(front)
+    assert keep.any() and np.max((xyz - D.APEXES.mean(0)) @ front) < -D.NECK_BEHIND
