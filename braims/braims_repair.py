@@ -63,7 +63,7 @@ def even_copies(session):
         name = re.sub(r"Eq\d+(?=_)", "", src.name)
         if name != src.name:
             src.replace(src.with_name(name))             # the Eq copy has no sidecar: the stretched image's own stays
-            note(src.with_name(name), "slices were missing from the export: the converter's evenly resampled copy is used")
+            note(src.with_name(name), "slices missing: evenly resampled copy used")
 
 
 def own_name(name):
@@ -99,8 +99,7 @@ def extra_copies(session):
             rename(own.parent, img.name[:-7], f"renaming{k}")
         for k, name in enumerate(names):
             rename(own.parent, f"renaming{k}", name)
-            note(own.parent / (name + ".nii.gz"), "the export held this series more than once: " +
-                 ("this is the largest image" if k == 0 else "this is another copy, kept for the core center"))
+            note(own.parent / (name + ".nii.gz"), "exported more than once: " + ("the largest image" if k == 0 else "another copy, kept"))
 
 
 def fix_header(img):
@@ -113,7 +112,7 @@ def fix_header(img):
         data = np.asanyarray(im.dataobj)
         im.header.set_sform(q, int(h["qform_code"]))
         nib.Nifti1Image(data, None, im.header).to_filename(img)
-        note(img, "the image's two orientation matrices disagreed: the one that fits the voxel size is kept")
+        note(img, "orientation matrices disagreed: repaired")
 
 
 def unmosaic(img, like):
@@ -142,7 +141,7 @@ def unmosaic(img, like):
     out.header.set_zooms(im.header.get_zooms()[:out.ndim])
     out.header.set_xyzt_units(*im.header.get_xyzt_units())
     out.to_filename(img)
-    note(img, f"scanner mosaic unpacked into {count} slices: the export had lost the scanner's private header")
+    note(img, f"scanner mosaic unpacked into {count} slices")
 
 
 def repair(session):
