@@ -1,8 +1,15 @@
 @echo off
-rem BRAIMS Package: build the upload package in the outbox folder (refused while the check finds errors).
+rem BRAIMS Package. Keep this file in your BRAIMS folder, next to the raw folder, and double-click it.
 title BRAIMS Package
 cd /d "%~dp0"
 set DOCKER_CLI_HINTS=false
-docker run --rm -v "%CD%:/data" ghcr.io/jonadabsilva/braims:1.0.0 package
+echo %CD% | findstr /i "OneDrive Dropbox Google iCloud" >nul && (
+  echo This BRAIMS folder is inside a cloud-synchronised folder: exams would be copied to the cloud.
+  echo Move the BRAIMS folder to a local disk, for example C:\BRAIMS, and run again.
+  pause & exit /b 1 )
+docker info >nul 2>&1 || (
+  echo Docker is not running. Start Docker Desktop, wait until it says it is running, then double-click again.
+  pause & exit /b 1 )
+docker run --rm -v "%CD%:/data" ghcr.io/jonadabsilva/braims:1.1.0 package
 echo.
 pause

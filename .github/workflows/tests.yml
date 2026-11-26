@@ -1,0 +1,18 @@
+# Runs the BRAIMS unit tests (naming, check, repairs, defacing logic, pre-flight) on every push and pull request.
+name: Tests
+on:
+  push:
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy nibabel scipy pyyaml pillow pydicom pytest
+      - run: python -m pytest -q tests
