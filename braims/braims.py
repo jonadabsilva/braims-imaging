@@ -3,6 +3,7 @@
 
     braims run       sort, name, convert, remove neck and face, check and fix, then write the report
     braims package   build the upload package (refused while the check finds errors)
+    braims reapply   after correcting masks in ITK-SNAP: apply them again (from the kept originals), check, report
     braims deface    step-by-step route: remove the neck and face in bids/ (add --reapply after editing masks)
 
 The site's BRAIMS folder holds:
@@ -12,10 +13,11 @@ The site's BRAIMS folder holds:
     outbox/                       the upload packages
     naming_rules_local.csv        optional: extra naming rules sent by the core center
 """
-import base64, csv, datetime, html, re, subprocess, sys
+import base64, datetime, html, json, re, subprocess, sys
 from pathlib import Path
 import yaml
 import braims_naming as naming
+import braims_meta as meta
 
 DATA = Path("/data")
 RAW, BIDS, REPORTS, OUTBOX = DATA / "raw", DATA / "bids", DATA / "reports", DATA / "outbox"
@@ -73,7 +75,7 @@ def report(rows, deface_out, check_out, check_ok):
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
     out = REPORTS / f"BRAIMS_report_{stamp}.html"
     esc = html.escape
-    flag = lambda note: ' style="color:#C00000;font-weight:bold"' if note.startswith(("NOT", "no BRAIMS")) else ""
+    flag = lambda note: ' style="color:#C00000;font-weight:bold"' if note.startswith(("NOT", "no BRAIMS")) or "POSSIBLY" in note or note.startswith("spine") else ""
     series = "".join(f"<tr><td>{esc(d)}</td><td>{esc(r)}</td><td{flag(n)}>{esc(n)}</td></tr>" for d, r, n in sorted(set(rows)))
     sessions = []
     for ses in sorted({p.parent.parent for p in BIDS.glob("sub-*/**/*.nii.gz")}):
@@ -81,6 +83,17 @@ def report(rows, deface_out, check_out, check_ok):
         pics = sorted((BIDS / "derivatives" / "braims_deface" / ses.relative_to(BIDS)).glob("*_deface_check.png"))
         sessions.append(f"<h3>{esc(str(ses.relative_to(BIDS)))}</h3><p>{files}</p>" +
                         "".join(f"<p><b>Top: before. Bottom: after neck and face removal.</b><br>{picture(p)}</p>" for p in pics))
+    held = []
+    for side in sorted(BIDS.glob("sub-*/ses-*/*/*.json")):
+        try:
+            why = json.loads(side.read_text(encoding="utf-8")).get("BRAIMSHold")
+        except ValueError:
+            why = None
+        if why:
+            held.append(f"<tr><td>{esc(str(side.relative_to(BIDS))[:-5])}</td><td>{esc(why)}</td></tr>")
+    held_html = ("<table><tr><th>Image</th><th>Why it stays at the site</th></tr>" + "".join(held) + "</table>"
+                 if held else "<p>None.</p>")
+    trouble = "".join(f"<li><b>{esc(w)}</b>: {esc(m)}</li>" for w, m in problems)
     verdict = ('<p style="color:#00703C;font-weight:bold">The check found no errors. A second person reads this report, '
                'then the site runs Package.</p>' if check_ok else
                '<p style="color:#C00000;font-weight:bold">The check found errors (section 4). Do not send. Fix them as Part E of '
@@ -90,34 +103,88 @@ def report(rows, deface_out, check_out, check_ok):
 table{{border-collapse:collapse;width:100%}} td,th{{border:1px solid #bbb;padding:4px 8px;font-size:14px;vertical-align:top}}
 th{{background:#1F4E79;color:#fff;text-align:left}} pre{{background:#f4f4f4;padding:10px;font-size:12px;white-space:pre-wrap}}</style></head><body>
 <h1>BRAIMS report</h1><p>{stamp.replace('_', ' ')}. This report shows faces before defacing: it stays at the site.</p>{verdict}
+{f'<h2>Problems during the run</h2><ul style="color:#C00000">{trouble}</ul>' if trouble else ''}
 <h2>1. How each series was named</h2><table><tr><th>Series on the scanner</th><th>BRAIMS name</th><th>Why</th></tr>{series}</table>
 <h2>2. Each session, with the defacing check</h2>{''.join(sessions)}
 <h2>3. Neck and face removal</h2><pre>{esc(deface_out)}</pre>
-<h2>4. Check</h2><pre>{esc(check_out)}</pre></body></html>""", encoding="utf-8")
+<h2>4. Check</h2><pre>{esc(check_out)}</pre>
+<h2>5. Images held at the site (not in the package)</h2>{held_html}</body></html>""", encoding="utf-8")
     return out
 
 
+class Lock:
+    """One run at a time on a BRAIMS folder (two double-clicks would write the same files)."""
+    path = DATA / ".braims_running"
+
+    def __enter__(self):
+        if self.path.exists() and datetime.datetime.now().timestamp() - self.path.stat().st_mtime < 24 * 3600:
+            sys.exit(f"BRAIMS is already running on this folder (started {self.path.read_text().strip()}). Wait for it to "
+                     f"finish. If no BRAIMS window is open, delete the file {self.path.name} in the BRAIMS folder.")
+        self.path.write_text(datetime.datetime.now().isoformat(timespec="minutes"))
+        return self
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+
+
+def step(name, *cmd, capture=False):
+    """Run one tool; a failure is printed and noted for the report, never hidden."""
+    code, out = sh(*cmd, capture=capture)
+    if code:
+        problems.append((name, f"ended with an error (code {code}); see the terminal output"))
+        print(f"\n!! {name} ended with an error (code {code}). The check will block anything incomplete.\n", flush=True)
+    return code, out
+
+
+problems = []
+
+
 def run():
-    if not RAW.is_dir():
-        sys.exit(f"No raw folder in {DATA}. Put each exam in raw/sub-<code>/ses-<nn> first.")
-    title("1/6 Sort the series (dicomsort)")
-    sh("dicomsort", RAW, "-i", "sub-", "-j", "ses-", "-p", ".*")
-    title("2/6 Scan the sequences (bidsmapper)")
-    sh("bidsmapper", RAW, BIDS, "-a")
-    title("3/6 Name the sequences (BRAIMS naming rules)")
-    rows = name_series()
-    for d, r, n in sorted(set(rows)):
-        print(f"  {d[:40]:40}  {r[:45]:45}  {n}")
-    title("4/6 Convert (bidscoiner)")
-    sh("bidscoiner", RAW, BIDS)
-    title("5/6 Remove the neck and face")
-    _, deface_out = sh("python", HERE / "braims_deface.py", BIDS, capture=True)
-    title("6/6 Check and fix")
+    with Lock():
+        title("0/7 Check the exam folders before starting")
+        found = meta.preflight(RAW, DATA)
+        if found:
+            for where, what in found:
+                print(f"  STOP  {where}: {what}")
+            sys.exit("\nNothing was run. Fix the folders above, then run again.")
+        print("  The exam folders are fine.")
+        for ses in meta.stale_sessions(RAW, BIDS):          # interrupted before, or the exam changed: convert again
+            print(f"  {ses.relative_to(BIDS)}: converted again (interrupted before, or the exam folder changed)")
+            meta.forget(ses, BIDS)
+        title("1/7 Sort the series (dicomsort)")
+        step("dicomsort", "dicomsort", RAW, "-i", "sub-", "-j", "ses-", "-p", ".*")
+        title("2/7 Scan the sequences (bidsmapper)")
+        step("bidsmapper", "bidsmapper", RAW, BIDS, "-a")
+        title("3/7 Name the sequences (BRAIMS naming rules)")
+        rows = name_series()
+        for d, r, n in sorted(set(rows)):
+            print(f"  {d[:40]:40}  {r[:45]:45}  {n}")
+        title("4/7 Convert (bidscoiner)")
+        code, _ = step("bidscoiner", "bidscoiner", RAW, BIDS)
+        if not code:
+            meta.mark_converted(RAW, BIDS)
+        finish(rows)
+
+
+def finish(rows, deface_args=()):
+    title("5/7 Remove the neck and face")
+    _, deface_out = step("defacing", "python", HERE / "braims_deface.py", BIDS, *deface_args, capture=True)
+    title("6/7 Keep what analysis needs: scanner IDs, days between sessions")
+    print(f"  scanner IDs written in {meta.scanner_ids(BIDS)} sidecar(s)")
+    print(f"  sessions.tsv written for {len(meta.write_sessions(BIDS, RAW))} subject(s)")
+    meta.provenance(BIDS)
+    title("7/7 Check and fix")
     sh("python", HERE / "braims_check.py", BIDS, "--fix")
     code, check_out = sh("python", HERE / "braims_check.py", BIDS, capture=True)
-    out = report(rows, deface_out, check_out, code == 0)
+    out = report(rows, deface_out, check_out, code == 0 and not problems)
     title("Done")
     print(f"Open the report: reports/{out.name}\nA second person reads it. If it is right, run Package.")
+
+
+def reapply():
+    """After correcting masks in ITK-SNAP: apply the saved masks again (from the kept originals), check and report."""
+    with Lock():
+        finish([], ("--reapply",))
 
 
 def package():
@@ -136,5 +203,5 @@ def deface():
 
 
 if __name__ == "__main__":
-    {"run": run, "package": package, "deface": deface}.get(sys.argv[1] if len(sys.argv) > 1 else "run",
+    {"run": run, "package": package, "deface": deface, "reapply": reapply}.get(sys.argv[1] if len(sys.argv) > 1 else "run",
                                                          lambda: sys.exit(__doc__))()
