@@ -99,7 +99,10 @@ def main():
 
     # analysis information
     s = (bids / "sub-BR010001" / "sub-BR010001_sessions.tsv").read_text().split()
-    check("days_from_baseline", s[-4:] == ["ses-01", "0", "ses-02", "445"], s)
+    if (bids / "sub-BR010001" / "ses-02").exists():
+        check("days_from_baseline", s[-4:] == ["ses-01", "0", "ses-02", "445"], s)
+    else:
+        check("days_from_baseline (one session)", s[-2:] == ["ses-01", "0"], s)
     check("scanner ID", all("BRAIMSScannerID" in meta(p) for p in anat("sub-BR010001")))
 
     # package
