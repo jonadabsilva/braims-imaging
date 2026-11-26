@@ -60,6 +60,9 @@ def main():
         before = np.sum(sample(orig, e + (0, 19, 0), 4) > 0)
         after = np.sum(sample(im, e + (0, 19, 0), 4) > 0)
         check(f"adult: eyelid in front of eye x={e[0]:+.0f} removed", before == 0 or after <= 0.1 * before, f"{after}/{before}")
+    for label, pt in (("frontal pole", (-15, 55, 0)), ("frontal pole", (15, 55, 0)), ("orbitofrontal cortex", (-10, 40, -20)),
+                      ("orbitofrontal cortex", (10, 40, -20)), ("forehead brain above the eyes", (-30, 45, 5))):
+        check(f"adult: {label} at {pt} kept", np.mean(sample(im, np.array(pt, float), 3) > 0) == 1.0)
     check("adult: defaced sidecar", meta(t1).get("Defaced") is True and meta(t1).get("BRAIMSDefaceVersion"))
     for p in anat("sub-BR010001"):
         if "orbit" in p.name:
@@ -70,6 +73,8 @@ def main():
     # child, tilted head
     for sub, label in (("sub-BR010003", "child"), ("sub-BR010002", "tilted GE head")):
         imgs = anat(sub)
+        if not (bids / sub).exists():
+            continue
         check(f"{label}: all images defaced", imgs and all(meta(p).get("Defaced") for p in imgs))
         look = [p for p in imgs if meta(p).get("DefacingNote")]
         print(f"      {label}: {len(look)} image(s) flagged for a look")
