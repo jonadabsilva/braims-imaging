@@ -19,19 +19,27 @@ checks. The BRAIMS site manual describes both routes, with screenshots and a tro
 ## One-click quick start
 
 1. Install Docker Desktop and start it.
-2. Make a BRAIMS folder (for example `C:\BRAIMS` or `~/BRAIMS`) and put the two launchers for your system in it
-   (`launchers/windows/*.bat` or `launchers/mac/*.command`).
+2. Make a BRAIMS folder on a local disk (for example `C:\BRAIMS` or `~/BRAIMS`; not inside OneDrive, Dropbox, Google
+   Drive or iCloud, which the launchers refuse) and put the three launchers for your system in it
+   (`launchers/windows/*.bat`, `launchers/mac/*.command` or `launchers/linux/*.sh`).
 3. Copy each exam into `raw/sub-<code>/ses-<nn>` (for example `raw/sub-BR010001/ses-01`). Write the code next to the
    person's name in your site key file, which stays at the site.
-4. Double-click **BRAIMS_Run**. The first run downloads the image (about 1 GB; 3.6 GB on disk).
+4. Double-click **BRAIMS_Run**. The first run downloads the image (about 1 GB; 3.6 GB on disk). Run first checks the
+   exam folders (BRAIMS codes, `ses-nn` names, one person per exam, free disk space) and stops, changing nothing,
+   if one is wrong.
 5. Open the newest file in `reports`. A second person reads it.
 6. Double-click **BRAIMS_Package**. Send the `.zip` and its `.sha256` from `outbox`.
+
+If a check picture shows a face, or tissue that should have stayed was removed, correct the mask in ITK-SNAP
+(`bids/derivatives/braims_deface/.../*_keepmask.nii.gz`) and double-click **BRAIMS_Reapply**: the corrected mask is
+applied to the image as it was converted (kept at the site), so tissue removed by mistake comes back.
 
 ```
 BRAIMS/
   raw/sub-BR010001/ses-01/...   DICOM, one folder per coded exam      (never leaves the site)
   bids/                         converted data, made by Run
-  bids/derivatives/             defacing masks and check pictures     (never leaves the site)
+  bids/derivatives/             defacing masks, check pictures and the images as converted, before defacing
+                                                                      (never leaves the site)
   reports/                      one report per run, shows faces       (never leaves the site)
   outbox/                       upload packages
   naming_rules_local.csv        optional extra naming rules from the core center
@@ -43,18 +51,25 @@ BRAIMS/
 |---|---|
 | Sort each exam into one folder per series | `dicomsort` (BIDScoin) |
 | Read one image per series and propose names | `bidsmapper` (BIDScoin) |
-| Apply the BRAIMS naming rules; anything not recognized is excluded and flagged | `braims/braims.py` with `braims/naming_rules.csv` |
-| Convert DICOM to BIDS (NIfTI + JSON sidecars), ages rounded and dates replaced | `bidscoiner` (BIDScoin, dcm2niix) |
+| Check the exam folders: BRAIMS codes, session names, one person per exam, free disk space | `braims/braims_meta.py` |
+| Apply the BRAIMS naming rules (accents and case ignored; Siemens, GE, Philips and Canon names); anything not recognized is excluded and flagged; spine series are recognized and held at the site | `braims/braims_naming.py` with `braims/naming_rules.csv` |
+| Convert DICOM to BIDS (NIfTI + JSON sidecars), ages rounded and dates replaced (BIDScoin `anon`, set by BRAIMS) | `bidscoiner` (BIDScoin, dcm2niix) |
 | Repair what the export or the converter left wrong: stretched images, extra copies, broken headers, scanner mosaics | `braims/braims_repair.py` |
 | Turn each session's 3D T1 head-up, remove the neck (FSL robustfov) and the face (pydeface's face mask) while keeping both orbits, then move that mask onto every other image of the session, orbit studies included (FSL FLIRT, 6 dof) | `braims/braims_deface.py` |
-| Remove identifying sidecar fields, header text and dates; refuse DICOM, wrong codes, names that are not valid and images that were not defaced | `braims/braims_check.py --fix` |
-| Zip the dataset with a SHA-256 manifest, leaving out `code/` and `derivatives/`, which stay at the site | `braims/braims_check.py --package` |
+| Keep what analysis needs without identifying anyone: a scanner ID (salted hash of the serial number, the same for every exam on one scanner) and the days between each person's sessions | `braims/braims_meta.py` |
+| Let out only what is on a list: BIDS images, sidecars and tables (any other file, DICOM recognized by its content, is an error); acquisition fields in the sidecars (anything else is removed; words in series names that are not MRI terms are masked); no text in the image headers; no dates; damaged images refused | `braims/braims_check.py --fix` |
+| Zip the dataset with a SHA-256 manifest, leaving out `code/`, `derivatives/` and held images, which stay at the site | `braims/braims_check.py --package` |
 
 The orbits are kept because they are study data (optic neuritis in MS, NMOSD and MOGAD). Each eye is found in the
 person's own 3D T1 (the dark vitreous, within 12 mm of where pydeface's registration puts it), and a cone from the eye
 back to the orbital apex is added to pydeface's face mask: 24 mm around the eye centre (12 mm beyond a normal eyeball),
-narrowing to 16 mm at the apex (`EYES`, `APEXES` and `ORBIT_RADIUS` in `braims/braims_deface.py`). The nose, mouth,
-cheeks, chin and neck are removed.
+narrowing to 16 mm at the apex (`EYES`, `APEXES` and `ORBIT_RADIUS` in `braims/braims_deface.py`). In front of the
+eye the cone stops 3 mm beyond the globe (`GLOBE_FRONT`), so the eyelids are removed with the rest of the face. The
+nose, mouth, cheeks, chin and neck are removed.
+
+Some images stay at the site, listed in the report (`BRAIMSHold` in the sidecar): spine series, until a validated
+spine defacing exists; series that only possibly show the spine (a long sagittal field of view), until a person
+decides; and sessions with no head image to place the face mask on (orbit studies alone).
 
 Every image is defaced: each step has a fallback, so that no image stays behind because of the tool.
 
@@ -65,7 +80,8 @@ Every image is defaced: each step has a fallback, so that no image stays behind 
   result passes when both eyes are found, no tissue is left where the nose is, and the two sides lose about the same.
   If none passes, the best one is used with a wider region kept around the orbits, and the session is marked for a look
   at its check picture (`DefacingNote` in the sidecars, a warning in the check).
-- An image that cannot be registered to the session's 3D T1 gets the mask by the scanner coordinates alone.
+- An image that cannot be registered to the session's 3D T1 gets the mask by the scanner coordinates alone. Diffusion
+  images get the mask with 5 mm more kept around it, because their geometry is distorted near the orbits.
 - Before defacing, `braims_repair.py` uses the converter's evenly resampled copy in place of an image stretched by
   missing slices, gives every extra copy of a series a valid name (`rec-copy2`, ...), repairs an orientation matrix
   that does not fit the voxel size, and unpacks a Siemens mosaic that the converter left as one flat picture because
@@ -78,8 +94,12 @@ whole (10.5 to 11.6 mm beyond the globe) and the nose was removed. Placement fro
 voxel for voxel, with the same affine, on a scan available both ways.
 
 In the step-by-step route, defacing runs from the same image:
-`docker run --rm -v C:\BRAIMS:/data ghcr.io/jonadabsilva/braims:1.0.0 deface`. Masks can be corrected by hand in
+`docker run --rm -v C:\BRAIMS:/data ghcr.io/jonadabsilva/braims:1.1.0 deface`. Masks can be corrected by hand in
 ITK-SNAP and applied again with `deface --reapply`.
+
+Tests: `python -m pytest tests` (naming of 70+ real series names, the check against planted identifiers, repairs,
+defacing logic, pre-flight). End to end with the real tools: `tests/make_exams.py` builds DICOM exams from TemplateFlow
+heads (adult, child, tilted, with spine, orbits only), then `tests/e2e_assert.py` checks the result (see the files).
 
 To build the image yourself: `docker build -f docker/Dockerfile -t braims .`
 
