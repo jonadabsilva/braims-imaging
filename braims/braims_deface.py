@@ -23,7 +23,8 @@ Every keep mask (1 = keep, 0 = removed) is saved in bids/derivatives/braims_defa
 with a before/after picture of the head surface for each session.
 With --reapply, an image whose mask is already saved there gets that mask (for example one corrected in ITK-SNAP).
 """
-import json, shutil, subprocess, sys, tempfile
+import contextlib, io, json, os, shutil, subprocess, sys, tempfile
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
 import nibabel as nib
@@ -311,12 +312,20 @@ def apply_keep(img, keep):
 import pydeface
 FACE = nib.load(Path(pydeface.__file__).parent / "data" / "facemask.nii.gz")
 MARKS = landmarks(Path(tempfile.mkdtemp()) / "orbit_landmarks.nii.gz")
-done, failed, look = 0, [], []
-sessions = sorted({p.parent.parent for d in ("anat", "dwi") for p in bids.glob(f"sub-*/**/{d}/*.nii.gz")})
-for session in sessions:
+
+
+def deface_session(session):
+    """Deface one session; returns what it printed, the number of images defaced, those not defaced, and whether to look."""
+    done, failed, look = 0, [], []
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        return _deface_session(session, done, failed, look, out)
+
+
+def _deface_session(session, done, failed, look, out):
     images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
     if all(sidecar(p)[1].get("Defaced") is True for p in images):
-        continue
+        return out.getvalue(), done, failed, look
     print(session.relative_to(bids))
     repair(session)
     images = [p for d in ("anat", "dwi") for p in sorted((session / d).glob("*.nii.gz"))]
@@ -332,7 +341,7 @@ for session in sessions:
             done += 1
             print(f"  done  {img.relative_to(session)}  (saved mask applied, {removed:.0f}% removed)")
     if not todo:
-        continue
+        return out.getvalue(), done, failed, look
     ref = reference(images)
     picture = saved / session.relative_to(bids) / f"{'_'.join(session.relative_to(bids).parts)}_deface_check.png"
     with tempfile.TemporaryDirectory() as tmp:
@@ -347,7 +356,7 @@ for session in sessions:
         except Exception as e:                            # an image that cannot be read at all
             print(f"  NOT DEFACED  the whole session: {ref.name} could not be read ({e})")
             failed += todo
-            continue
+            return out.getvalue(), done, failed, look
         if placed:
             print(f"  face mask placed by {placed}, on {ref.name}")
         if unsure:
@@ -396,6 +405,16 @@ for session in sessions:
             done += 1
             print(f"  done  {img.relative_to(session)}  ({removed:.0f}% of the volume removed"
                   + (", mask moved by the scanner coordinates)" if how.endswith("scanner coordinates") else ")"))
+    return out.getvalue(), done, failed, look
+
+
+done, failed, look = 0, [], []
+sessions = sorted({p.parent.parent for d in ("anat", "dwi") for p in bids.glob(f"sub-*/**/{d}/*.nii.gz")})
+workers = max(1, min(len(sessions), os.cpu_count() or 1))     # one session per processor: FLIRT uses one each
+with ProcessPoolExecutor(workers) as pool:
+    for text, n, bad, unsure in pool.map(deface_session, sessions):
+        print(text, end="", flush=True)
+        done, failed, look = done + n, failed + bad, look + unsure
 print(f"\n{done} image(s) defaced. Look at one image per session before you go on.")
 if look:
     print(f"{len(look)} session(s) need a look at their check picture first: " + ", ".join(str(s.relative_to(bids)) for s in look))
